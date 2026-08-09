@@ -1,0 +1,14 @@
+node_modules
+.next
+.next-dev
+.next-*
+dist
+coverage
+.env
+.env.local
+*.log
+*.tsbuildinfo
+.turbo
+.playwright-cli
+output
+apps/api/prisma/dev.db

@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /api/
+Disallow: /api/v1/
+Disallow: /shops
+Disallow: /products
+Disallow: /search
+

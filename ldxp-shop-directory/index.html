@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>链动公开店铺目录</title>
+  <link rel="icon" href="https://pay.ldxp.cn/favicon.ico">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="https://pay.ldxp.cn/favicon.ico" alt="" width="32" height="32">
+      <div>
+        <h1>链动公开店铺目录</h1>
+        <p id="dataStatus">正在读取公开店铺数据</p>
+      </div>
+    </div>
+    <a class="source-link" href="https://pay.ldxp.cn/" target="_blank" rel="noreferrer">
+      <i data-lucide="external-link"></i>
+      链动小铺
+    </a>
+  </header>
+
+  <main>
+    <section class="metrics" aria-label="数据概览">
+      <div><span>公开店铺</span><strong id="shopCount">0</strong></div>
+      <div><span>在售商品记录</span><strong id="productCount">0</strong></div>
+      <div><span>当前筛选</span><strong id="resultCount">0</strong></div>
+    </section>
+
+    <section class="toolbar" aria-label="店铺筛选">
+      <label class="search-field">
+        <i data-lucide="search"></i>
+        <input id="searchInput" type="search" placeholder="搜索店铺、分类或商品" autocomplete="off">
+      </label>
+
+      <label>
+        <span>分类</span>
+        <select id="categoryFilter">
+          <option value="">全部分类</option>
+        </select>
+      </label>
+
+      <label>
+        <span>排序</span>
+        <select id="sortSelect">
+          <option value="products-desc">商品数量：多到少</option>
+          <option value="updated-desc">最近更新</option>
+          <option value="price-asc">最低价格：低到高</option>
+          <option value="name-asc">店铺名称</option>
+        </select>
+      </label>
+    </section>
+
+    <section id="shopGrid" class="shop-grid" aria-live="polite"></section>
+
+    <div id="emptyState" class="empty-state" hidden>
+      <i data-lucide="store"></i>
+      <strong>没有匹配的店铺</strong>
+      <span>请调整搜索条件</span>
+    </div>
+
+    <nav class="pagination" aria-label="分页">
+      <button id="prevPage" type="button" title="上一页" aria-label="上一页">
+        <i data-lucide="chevron-left"></i>
+      </button>
+      <span id="pageLabel">第 1 / 1 页</span>
+      <button id="nextPage" type="button" title="下一页" aria-label="下一页">
+        <i data-lucide="chevron-right"></i>
+      </button>
+    </nav>
+  </main>
+
+  <template id="shopCardTemplate">
+    <article class="shop-card">
+      <div class="card-head">
+        <div class="avatar" aria-hidden="true"></div>
+        <div class="shop-title">
+          <h2></h2>
+          <span class="updated"></span>
+        </div>
+      </div>
+      <p class="summary"></p>
+      <dl class="shop-stats">
+        <div><dt>商品</dt><dd class="products"></dd></div>
+        <div><dt>价格</dt><dd class="price"></dd></div>
+        <div><dt>库存</dt><dd class="stock"></dd></div>
+      </dl>
+      <div class="categories"></div>
+      <a class="open-shop" target="_blank" rel="noreferrer">
+        打开店铺
+        <i data-lucide="arrow-up-right"></i>
+      </a>
+    </article>
+  </template>
+
+  <script src="shops.js"></script>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

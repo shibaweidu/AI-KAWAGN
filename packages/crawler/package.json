@@ -1,0 +1,14 @@
+{
+  "name": "@ai-card/crawler",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "@ai-card/contracts": "workspace:*", "fast-xml-parser": "^5.2.5", "zod": "^3.25.0" },
+  "devDependencies": { "typescript": "^5.8.0", "vitest": "^3.1.0" }
+}

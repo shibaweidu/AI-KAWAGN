@@ -1,0 +1,2 @@
+import type { Metadata } from "next";import { Toolbox } from "@phosphor-icons/react/dist/ssr";import { LocalTools } from "@/components/Forms";
+export const metadata:Metadata={title:"实用小工具"};export default function ToolsPage(){return <><section className="page-hero"><div className="shell"><span className="kicker"><Toolbox/>隐私优先</span><h1>站内小工具</h1><p>输入仅在当前浏览器页面中处理，不上传、不保存、不记录。</p></div></section><section className="shell page-section"><LocalTools/></section></>}

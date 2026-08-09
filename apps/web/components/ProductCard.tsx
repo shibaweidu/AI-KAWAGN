@@ -1,0 +1,6 @@
+import Link from "next/link";
+import { ArrowRight, Storefront } from "@phosphor-icons/react/dist/ssr";
+import { MediaThumbnail } from "./MediaThumbnail";
+
+export type ProductCardModel = { id: string; slug: string; title: string; summary: string; category: string; thumbnailUrl?: string | null; lowestPrice: number; highestPrice: number; offerCount: number; specification?: string };
+export function ProductCard({ product }: { product: ProductCardModel }) { return <article className="product-card"><div className="product-card-top"><MediaThumbnail value={product.thumbnailUrl} label={product.title} kind="product" /><span className="category-label">{product.category}</span></div><h3><Link href={`/products/${product.slug}`}>{product.title}</Link></h3><p>{product.summary || product.specification || "公开报价聚合，购买前请核对原店库存与售后条款。"}</p>{product.specification && <div className="tag-row"><span>{product.specification}</span></div>}<div className="price-row"><div><small>当前最低</small><strong><em>¥</em>{product.lowestPrice.toFixed(2)}</strong>{product.highestPrice !== product.lowestPrice && <span>– ¥{product.highestPrice.toFixed(2)}</span>}</div><div className="offer-count"><Storefront /><b>{product.offerCount}</b><small>家报价</small></div></div><Link className="card-link" href={`/products/${product.slug}`}>查看比价 <ArrowRight /></Link></article>; }
