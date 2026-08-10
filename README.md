@@ -59,6 +59,13 @@ SOURCE_211B_REQUEST_DELAY_MS=5000
 pnpm --filter @ai-card/api backfill:ldxp-products -- --batch-size=10
 ```
 
+链动接口不可用时，可以先用仓库内已有快照离线回填 211b 店铺。命令默认只预览，只有增加 `--apply` 才会写入数据库；匹配严格区分 token 大小写，按快照校验和支持中断后续跑：
+
+```bash
+pnpm --filter @ai-card/api backfill:ldxp-snapshot-links
+pnpm --filter @ai-card/api backfill:ldxp-snapshot-links -- --apply
+```
+
 ## 生产部署
 
 生产环境使用 `compose.prod.yml`。GitHub Actions 会在 `master` 更新后构建 API、Worker 和 Web 镜像并推送到 GHCR，服务器只需拉取镜像，不需要在低内存机器上编译 Next.js。
