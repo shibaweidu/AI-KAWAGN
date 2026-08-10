@@ -4,6 +4,20 @@
 
 ## 快速开始
 
+Windows 本地开发可以直接双击根目录的 `start-project.cmd`。脚本会自动检查 Node.js、pnpm 和 Docker Desktop，创建本地配置与管理员账号，启动依赖服务，执行数据库迁移，然后启动 Web、API 和 Worker。首次启动会自动打开首页，终端中会显示管理员账号和密码。
+
+默认设置 `PAUSE_SOURCE_JOBS=true`，因此一键启动不会执行 211b 发现、商品补全或其他来源同步；站内搜索索引 Worker 仍正常运行。解除来源限流并准备继续采集时，在 `.env` 中改为 `PAUSE_SOURCE_JOBS=false` 后重新启动项目。
+
+也可以在 PowerShell 中使用参数：
+
+```powershell
+.\start-project.cmd -SkipInstall   # 已安装依赖时跳过 pnpm install
+.\start-project.cmd -SetupOnly     # 只准备环境、迁移和管理员，不启动应用
+.\start-project.cmd -NoBrowser     # 启动后不自动打开浏览器
+```
+
+手工启动流程如下：
+
 ```powershell
 Copy-Item .env.example .env
 pnpm install

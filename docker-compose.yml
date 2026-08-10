@@ -67,6 +67,7 @@ services:
       API_ORIGIN: http://api:4000
       WORKER_TOKEN: ${WORKER_TOKEN:-development-worker-token-change-me}
       ENABLE_SOURCE_SCHEDULERS: ${ENABLE_SOURCE_SCHEDULERS:-false}
+      PAUSE_SOURCE_JOBS: ${PAUSE_SOURCE_JOBS:-true}
     depends_on: [api, redis]
   web:
     build:

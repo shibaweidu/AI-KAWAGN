@@ -27,6 +27,7 @@ const indexWorker = new Worker("index-outbox", async () => {
 const ldxpWorker = new Worker("ldxp-sync", async (job) => {
   const source = await prisma.dataSource.findUnique({ where: { key: "ldxp" } });
   if (!source) return { skipped: "source_missing" };
+  if (process.env.PAUSE_SOURCE_JOBS === "true") return { skipped: "source_jobs_paused" };
   const backfill = await prisma.ingestionRun.findFirst({
     where: { dataSourceId: source.id, kind: "ldxp-product-backfill", status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } },
     orderBy: { createdAt: "asc" },
