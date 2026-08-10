@@ -10,7 +10,8 @@ const fallbackSettings = { siteName: "AI卡网", seoTitle: "全网数字商品�
 
 export async function generateMetadata(): Promise<Metadata> {
   let settings = fallbackSettings;
-  try {
+  // Do not make the image build depend on a running API. Runtime requests can still use live settings.
+  if (process.env.NEXT_PHASE !== "phase-production-build") try {
     const origin = process.env.API_ORIGIN || "http://localhost:4000";
     const response = await fetch(`${origin}/v1/site-settings`, { next: { revalidate: 60 } });
     if (response.ok) settings = { ...settings, ...await response.json() };

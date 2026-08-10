@@ -28,6 +28,65 @@ ENABLE_SOURCE_SCHEDULERS=false
 
 完成来源条款确认和候选审核后，才可在受控环境中启用调度器。所有外部数据先进入候选区，批准前不会出现在公开页面。
 
+## 生产部署
+
+生产环境使用 `compose.prod.yml`。GitHub Actions 会在 `master` 更新后构建 API、Worker 和 Web 镜像并推送到 GHCR，服务器只需拉取镜像，不需要在低内存机器上编译 Next.js。
+
+服务器首次部署：
+
+```bash
+git clone https://github.com/shibaweidu/AI-KAWAGN.git /opt/ai-card
+cd /opt/ai-card
+./scripts/init-production-env.sh example.com
+./scripts/doctor.sh
+./scripts/deploy.sh
+```
+
+首次部署时同时恢复种子数据，使用下面这条命令代替最后一行。脚本会在 API 第一次启动前完成迁移和恢复：
+
+```bash
+SEED_DUMP=/root/aicard-seed-data-20260810.dump ./scripts/deploy.sh
+```
+
+使用服务器 IP 测试时，把 `example.com` 换成服务器 IP，脚本会使用 HTTP `:80`。使用域名时，先把域名 A/AAAA 记录指向服务器，并开放 TCP 80、TCP/UDP 443，Caddy 会自动申请 HTTPS 证书。
+
+如果 GHCR 镜像尚未设为公开，需要先执行 `docker login ghcr.io`。也可以在服务器本地构建：
+
+```bash
+BUILD_LOCAL=1 ./scripts/deploy.sh
+```
+
+后续更新：
+
+```bash
+PULL_LATEST=1 ./scripts/deploy.sh
+```
+
+GitHub Actions 同时保留完整 Git 提交哈希镜像。需要回退时，将 `IMAGE_TAG` 临时指定为上一个提交哈希：
+
+```bash
+IMAGE_TAG=<git-commit-sha> ./scripts/deploy.sh
+```
+
+API 容器每次启动都会先运行 `prisma migrate deploy`。数据库、Redis、Meilisearch、MinIO 和 Caddy 数据使用具名卷，更新容器不会清空数据。
+
+### 数据与管理员
+
+单独恢复尚未启动过应用的空数据库：
+
+```bash
+./scripts/restore-seed.sh backups/aicard-seed-data.dump
+```
+
+恢复脚本默认拒绝写入已有业务数据的数据库。生产备份和管理员创建：
+
+```bash
+./scripts/backup.sh
+./scripts/create-admin.sh admin@example.com
+```
+
+`.env.production`、`backups/` 和 `*.dump` 已被 Git 忽略，不要上传到 GitHub。生产环境默认关闭来源定时采集，完成来源权限确认后再设置 `ENABLE_SOURCE_SCHEDULERS=true`。
+
 ## 目录
 
 - `apps/web`: Next.js 前台与运营后台

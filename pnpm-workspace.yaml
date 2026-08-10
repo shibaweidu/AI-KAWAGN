@@ -1,3 +1,13 @@
 packages:
   - apps/*
   - packages/*
+
+# These packages compile native bindings or ship Prisma runtime engines needed in production.
+onlyBuiltDependencies:
+  - '@prisma/client'
+  - '@prisma/engines'
+  - argon2
+  - esbuild
+  - msgpackr-extract
+  - prisma
+  - sharp

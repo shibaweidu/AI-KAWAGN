@@ -1,7 +1,11 @@
 import type { NextConfig } from "next";
+import { resolve } from "node:path";
+
 const nextConfig: NextConfig = {
   // Keep dev output separate so a concurrent production build cannot invalidate dev CSS chunks.
   distDir: process.env.NODE_ENV === "development" ? ".next-dev" : ".next",
+  output: "standalone",
+  outputFileTracingRoot: resolve(process.cwd(), "../.."),
   transpilePackages: ["@ai-card/contracts"],
   async rewrites() { return [{ source: "/api/:path*", destination: `${process.env.API_ORIGIN || "http://localhost:4000"}/:path*` }]; },
 };
