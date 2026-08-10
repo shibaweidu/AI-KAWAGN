@@ -1,4 +1,4 @@
-import { normalizeApprovedHomepageUrl, parse211bDiscoveryInput, parse211bShopDirectory, parseImportRows, parseLdxpSchedule } from "./ingestion.service";
+import { isLdxp211bCandidate, isLdxpProductSyncPending, normalizeApprovedHomepageUrl, parse211bDiscoveryInput, parse211bShopDirectory, parse211bShopProducts, parseImportRows, parseLdxpProductBackfillInput, parseLdxpSchedule } from "./ingestion.service";
 
 describe("ingestion import preview", () => {
   it("returns explicit valid and invalid counts for the admin preview", () => {
@@ -54,6 +54,21 @@ describe("LDXP schedule", () => {
   });
 });
 
+describe("LDXP product backfill", () => {
+  it("uses bounded batches", () => {
+    expect(parseLdxpProductBackfillInput({})).toEqual({ batchSize: 25 });
+    expect(parseLdxpProductBackfillInput({ batchSize: "50" })).toEqual({ batchSize: 50 });
+    expect(() => parseLdxpProductBackfillInput({ batchSize: 101 })).toThrow("1-100");
+  });
+
+  it("only treats a completed product sync marker as hydrated", () => {
+    expect(isLdxpProductSyncPending({ discoverySource: "211b.site" })).toBe(true);
+    expect(isLdxpProductSyncPending({ productSyncedAt: "2026-08-10T00:00:00.000Z" })).toBe(false);
+    expect(isLdxp211bCandidate({ discoverySource: "211b.site" })).toBe(true);
+    expect(isLdxp211bCandidate({ importedSource: "ldxp-shop-directory" })).toBe(false);
+  });
+});
+
 describe("211b directory discovery", () => {
   it("extracts public shop cards as LDXP candidates", () => {
     const html = `
@@ -102,5 +117,34 @@ describe("211b directory discovery", () => {
     expect(() => parse211bDiscoveryInput({ maxPages: 0 })).toThrow("1-50");
     expect(() => parse211bDiscoveryInput({ maxPages: 51 })).toThrow("1-50");
     expect(() => parse211bDiscoveryInput({ maxProductShops: 201 })).toThrow("0-200");
+  });
+});
+
+describe("211b shop products", () => {
+  it("extracts category, product link, image, price and stock", () => {
+    const html = `
+      <div class="shop-profile"><span>测</span><div><h1>测试店铺</h1></div></div>
+      <div class="category-block">
+        <div class="section-heading"><div><h2>AI 账号</h2></div><span>2 件商品</span></div>
+        <article class="product-card">
+          <a class="product-image" href="https://pay.ldxp.cn/item/item-a"><img src="https://qn.ldxp.cn/a.png" alt="A"><span class="stock">库存 8</span></a>
+          <div class="product-body"><h3><a href="https://pay.ldxp.cn/item/item-a">GPT Plus</a></h3><div class="product-footer"><strong><small>¥</small>19.90</strong></div></div>
+        </article>
+        <article class="product-card">
+          <a class="product-image" href="https://pay.ldxp.cn/item/item-b"><span class="stock out">暂时缺货</span></a>
+          <div class="product-body"><h3><a href="https://pay.ldxp.cn/item/item-b">Claude Pro</a></h3><div class="product-footer"><strong><small>¥</small>29.00</strong></div></div>
+        </article>
+      </div>
+      <nav class="pagination"><span>第 1 / 3 页，共 120 件</span></nav>`;
+
+    expect(parse211bShopProducts(html, "shop-token")).toMatchObject({
+      name: "测试店铺",
+      totalPages: 3,
+      categories: [{ id: null, name: "AI 账号", goodsCount: 2 }],
+      items: [
+        { externalId: "ldxp:item-a", productName: "GPT Plus", category: "AI 账号", price: 19.9, stock: 8, offerUrl: "https://pay.ldxp.cn/item/item-a", imageUrl: "https://qn.ldxp.cn/a.png" },
+        { externalId: "ldxp:item-b", productName: "Claude Pro", category: "AI 账号", price: 29, stock: 0, offerUrl: "https://pay.ldxp.cn/item/item-b" },
+      ],
+    });
   });
 });

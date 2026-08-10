@@ -17,14 +17,8 @@ const SOURCE_DEFINITIONS = [
 
 const DEFAULT_HOT_SEARCHES = ["plus", "team", "pro", "k12", "cursor", "codex", "Claude", "kiro", "gemini", "邮箱", "接码"];
 const DISCOVERY_211B_ORIGIN = "https://211b.site";
-const DISCOVERY_211B_DELAY_MS = 500;
-const LDXP_API_ORIGIN = "https://pay.ldxp.cn";
-const LDXP_GOODS_TYPES = new Set(["card", "article", "resource", "equity"]);
-const LDXP_ALLOWED_ENDPOINTS = new Set(["/shopApi/Shop/info", "/shopApi/Shop/categoryList", "/shopApi/Shop/goodsList"]);
-const LDXP_PAGE_SIZE = 100;
-const LDXP_REQUEST_DELAY_MS = 350;
-let ldxpRequestGate = Promise.resolve();
-let nextLdxpRequestAt = 0;
+let shop211bRequestGate = Promise.resolve();
+let next211bRequestAt = 0;
 
 type Discovered211bShop = {
   token: string;
@@ -36,7 +30,8 @@ type Discovered211bShop = {
   logoUrl: string | null;
 };
 
-type HydrateTarget = { id: string; token: string };
+type HydrateTarget = { id: string; token: string; expectedProductCount?: number | null };
+type LdxpBackfillCandidate = HydrateTarget & { rawMetadata: Prisma.JsonValue | null };
 type LdxpProductItem = {
   externalId: string;
   productName: string;
@@ -49,6 +44,13 @@ type LdxpProductItem = {
   goodsType: string;
   categoryId: number | null;
 };
+
+class SourceRateLimitError extends Error {
+  constructor(message: string, readonly retryAfterAt: Date | null) {
+    super(message);
+    this.name = "SourceRateLimitError";
+  }
+}
 
 @Injectable()
 export class IngestionService implements OnModuleInit {
@@ -195,6 +197,156 @@ export class IngestionService implements OnModuleInit {
     return { accepted: true, queued: true, runId: run.id };
   }
 
+  async ldxpProductBackfillStatus(key: string) {
+    if (key !== "ldxp") throw new BadRequestException("仅支持链动小店商品补全");
+    const source = await this.source("ldxp");
+    const candidates = await this.ldxpBackfillCandidates(source.id);
+    const remainingShops = candidates.filter((candidate) => isLdxpProductSyncPending(candidate.rawMetadata)).length;
+    const activeRun = await this.prisma.ingestionRun.findFirst({
+      where: { dataSourceId: source.id, kind: "ldxp-product-backfill", status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } },
+      orderBy: { createdAt: "asc" },
+    });
+    return {
+      totalShops: candidates.length,
+      syncedShops: candidates.length - remainingShops,
+      remainingShops,
+      activeRun: activeRun ? { id: activeRun.id, status: activeRun.status, counts: activeRun.counts, createdAt: activeRun.createdAt } : null,
+    };
+  }
+
+  async requestLdxpProductBackfill(key: string, input: unknown) {
+    if (key !== "ldxp") throw new BadRequestException("仅支持链动小店商品补全");
+    const { batchSize } = parseLdxpProductBackfillInput(input);
+    const source = await this.source("ldxp");
+    const existing = await this.prisma.ingestionRun.findFirst({
+      where: { dataSourceId: source.id, kind: "ldxp-product-backfill", status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } },
+      orderBy: { createdAt: "asc" },
+    });
+    if (existing) return { accepted: true, queued: existing.status === SyncStatus.QUEUED, runId: existing.id, existing: true };
+    const status = await this.ldxpProductBackfillStatus(key);
+    if (!status.remainingShops) return { accepted: true, queued: false, runId: null, existing: false, complete: true };
+    const run = await this.prisma.ingestionRun.create({
+      data: {
+        dataSourceId: source.id,
+        kind: "ldxp-product-backfill",
+        status: SyncStatus.QUEUED,
+        counts: {
+          batchSize,
+          totalAtStart: status.totalShops,
+          remainingAtStart: status.remainingShops,
+          processedShops: 0,
+          succeededShops: 0,
+          failedShops: 0,
+          productsUpserted: 0,
+          offersPromoted: 0,
+          categoriesSynced: 0,
+          pass: 1,
+        },
+      },
+    });
+    return { accepted: true, queued: true, runId: run.id, existing: false, remainingShops: status.remainingShops };
+  }
+
+  async processLdxpProductBackfill(runId: string) {
+    const run = await this.prisma.ingestionRun.findUnique({ where: { id: runId }, include: { dataSource: true } });
+    if (!run || run.kind !== "ldxp-product-backfill" || run.dataSource.key !== "ldxp") throw new NotFoundException("商品补全任务不存在");
+    if (run.status === SyncStatus.SUCCEEDED || run.status === SyncStatus.FAILED) return { runId, status: run.status, counts: run.counts };
+    const counts = isRecord(run.counts) ? run.counts : {};
+    const batchSize = parseLdxpProductBackfillInput({ batchSize: counts.batchSize }).batchSize;
+    const pass = Math.max(1, numberValue(counts.pass));
+    const lastCandidateId = typeof counts.lastCandidateId === "string" ? counts.lastCandidateId : null;
+    const candidates = await this.ldxpBackfillCandidates(run.dataSourceId);
+    const pending = candidates.filter((candidate) => isLdxpProductSyncPending(candidate.rawMetadata));
+    const available = pending.filter((candidate) => !lastCandidateId || candidate.id > lastCandidateId);
+    const targets = available.slice(0, batchSize);
+
+    if (!targets.length) {
+      const retry = pending.length > 0 && pass < 3;
+      const finalCounts = {
+        ...counts,
+        pass: retry ? pass + 1 : pass,
+        lastCandidateId: retry ? null : counts.lastCandidateId,
+        remainingShops: pending.length,
+        ...(retry ? {} : { completedAt: new Date().toISOString() }),
+      };
+      const status = retry ? SyncStatus.QUEUED : SyncStatus.SUCCEEDED;
+      await this.prisma.ingestionRun.update({ where: { id: run.id }, data: { status, counts: finalCounts, finishedAt: retry ? null : new Date() } });
+      return { runId, status, counts: finalCounts };
+    }
+
+    await this.prisma.ingestionRun.update({
+      where: { id: run.id },
+      data: { status: SyncStatus.RUNNING, startedAt: run.startedAt || new Date(), errorCode: null, errorMessage: null },
+    });
+    let result;
+    try {
+      result = await this.hydrateLdxpProductsForCandidates(run.dataSource, run.id, targets);
+    } catch (error) {
+      if (!(error instanceof SourceRateLimitError)) throw error;
+      const remainingShops = (await this.ldxpBackfillCandidates(run.dataSourceId))
+        .filter((candidate) => isLdxpProductSyncPending(candidate.rawMetadata)).length;
+      const finalCounts = {
+        ...counts,
+        batchSize,
+        pass,
+        remainingShops,
+        pausedAt: new Date().toISOString(),
+        retryAfterAt: error.retryAfterAt?.toISOString() || null,
+      };
+      await this.prisma.ingestionRun.update({
+        where: { id: run.id },
+        data: {
+          status: SyncStatus.FAILED,
+          counts: finalCounts,
+          errorCode: error.name,
+          errorMessage: error.message.slice(0, 2000),
+          finishedAt: new Date(),
+        },
+      });
+      return { runId, status: SyncStatus.FAILED, counts: finalCounts };
+    }
+    const lastProcessed = targets[targets.length - 1].id;
+    const remainingAfterBatch = (await this.ldxpBackfillCandidates(run.dataSourceId))
+      .filter((candidate) => isLdxpProductSyncPending(candidate.rawMetadata)).length;
+    const hasMoreInThisPass = candidates.some((candidate) => candidate.id > lastProcessed && isLdxpProductSyncPending(candidate.rawMetadata));
+    const retry = !hasMoreInThisPass && remainingAfterBatch > 0 && pass < 3;
+    const finalCounts = {
+      ...counts,
+      batchSize,
+      pass: retry ? pass + 1 : pass,
+      lastCandidateId: retry ? null : lastProcessed,
+      processedShops: numberValue(counts.processedShops) + result.productShopsRequested,
+      succeededShops: numberValue(counts.succeededShops) + result.productShopsSucceeded,
+      failedShops: numberValue(counts.failedShops) + result.productShopsFailed,
+      productsUpserted: numberValue(counts.productsUpserted) + result.productsUpserted,
+      offersPromoted: numberValue(counts.offersPromoted) + result.offersPromoted,
+      categoriesSynced: numberValue(counts.categoriesSynced) + result.categoriesSynced,
+      remainingShops: remainingAfterBatch,
+      failures: [...jsonFailures(counts.failures), ...result.failures].slice(-100),
+    };
+    const status = hasMoreInThisPass || retry ? SyncStatus.QUEUED : SyncStatus.SUCCEEDED;
+    await this.prisma.ingestionRun.update({
+      where: { id: run.id },
+      data: { status, counts: finalCounts, finishedAt: status === SyncStatus.SUCCEEDED ? new Date() : null },
+    });
+    return { runId, status, counts: finalCounts };
+  }
+
+  private async ldxpBackfillCandidates(dataSourceId: string): Promise<LdxpBackfillCandidate[]> {
+    return this.prisma.shopCandidate.findMany({
+      where: { dataSourceId, reviewStatus: { not: CandidateReviewStatus.REJECTED } },
+      select: { id: true, externalId: true, rawMetadata: true },
+      orderBy: { id: "asc" },
+    }).then((candidates) => candidates
+      .filter((candidate) => isLdxp211bCandidate(candidate.rawMetadata))
+      .map((candidate) => ({
+        id: candidate.id,
+        token: candidate.externalId,
+        expectedProductCount: metadataProductCount(candidate.rawMetadata),
+        rawMetadata: candidate.rawMetadata,
+      })));
+  }
+
   async discoverLdxpFrom211b(key: string, input: unknown) {
     if (key !== "ldxp") throw new BadRequestException("仅支持发现链动小店目录");
     const { maxPages, syncProducts, maxProductShops } = parse211bDiscoveryInput(input);
@@ -214,7 +366,6 @@ export class IngestionService implements OnModuleInit {
 
       for (const shop of firstParsed.shops) addDiscovered211bShop(discovered, pageDuplicateKeys, shop);
       for (let page = 2; page <= pagesToFetch; page++) {
-        await sleep(DISCOVERY_211B_DELAY_MS);
         const fetched = await fetch211bDirectoryPage(page);
         pages.push(fetched);
         for (const shop of parse211bShopDirectory(fetched.html).shops) addDiscovered211bShop(discovered, pageDuplicateKeys, shop);
@@ -254,12 +405,16 @@ export class IngestionService implements OnModuleInit {
             caseVariantSkipped += 1;
             continue;
           }
+          const existingMetadata = isRecord(existingExact?.rawMetadata) ? existingExact.rawMetadata : {};
+          const alreadyProductSynced = typeof existingMetadata.productSyncedAt === "string";
           const metadata = {
+            ...existingMetadata,
             discoverySource: "211b.site",
             mirrorUrl: shop.mirrorUrl,
             originalShopUrl: shop.originalShopUrl,
             tokenFold: shop.token.toLowerCase(),
-            productCount: shop.productCount,
+            directoryProductCount: shop.productCount,
+            ...(!alreadyProductSynced ? { productCount: shop.productCount } : {}),
             minPrice: shop.minPrice,
             observedAt: observedAt.toISOString(),
           };
@@ -287,7 +442,7 @@ export class IngestionService implements OnModuleInit {
               rawMetadata: metadata,
             },
           });
-          if (syncProducts && hydrateTargets.length < maxProductShops) hydrateTargets.push({ id: candidate.id, token: shop.token });
+          if (syncProducts && hydrateTargets.length < maxProductShops) hydrateTargets.push({ id: candidate.id, token: shop.token, expectedProductCount: shop.productCount });
           if (existingExact) {
             if (candidateChangedFrom211b(existingExact, shop)) updated += 1;
             else unchanged += 1;
@@ -350,7 +505,8 @@ export class IngestionService implements OnModuleInit {
 
     for (const target of targets) {
       try {
-        const snapshot = await fetchLdxpShopSnapshot(target.token);
+        await this.markLdxpProductSyncState(target.id, "running");
+        const snapshot = await fetch211bShopSnapshot(target.token, target.expectedProductCount);
         categoriesSynced += snapshot.categories.length;
         const result = await this.prisma.$transaction(async (tx) => {
           const candidate = await tx.shopCandidate.findUnique({
@@ -361,13 +517,15 @@ export class IngestionService implements OnModuleInit {
           const metadata = {
             ...(isRecord(candidate.rawMetadata) ? candidate.rawMetadata : {}),
             sourceSite: "ldxp",
-            productSyncSource: "pay.ldxp.cn public shop api",
+            productSyncSource: "211b.site public shop page",
+            directoryProductCount: metadataProductCount(candidate.rawMetadata),
             productCount: snapshot.items.length,
             stock: snapshot.stock,
             minPrice: snapshot.minPrice,
             maxPrice: snapshot.maxPrice,
             categories: snapshot.categories.map((category) => category.name),
             categoryStats: snapshot.categories,
+            productSyncStatus: "completed",
             productSyncedAt: snapshot.observedAt.toISOString(),
           };
           await tx.shopCandidate.update({
@@ -442,7 +600,10 @@ export class IngestionService implements OnModuleInit {
         productsUpserted += result.upserted;
         offersPromoted += result.promoted;
       } catch (error) {
-        failures.push({ token: target.token, error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        await this.markLdxpProductSyncState(target.id, "failed", message).catch(() => undefined);
+        failures.push({ token: target.token, error: message });
+        if (error instanceof SourceRateLimitError) throw error;
       }
     }
 
@@ -455,6 +616,23 @@ export class IngestionService implements OnModuleInit {
       categoriesSynced,
       failures: failures.slice(0, 20),
     };
+  }
+
+  private async markLdxpProductSyncState(candidateId: string, status: "running" | "failed", error?: string) {
+    const candidate = await this.prisma.shopCandidate.findUnique({ where: { id: candidateId }, select: { rawMetadata: true } });
+    if (!candidate) return;
+    const metadata = isRecord(candidate.rawMetadata) ? candidate.rawMetadata : {};
+    await this.prisma.shopCandidate.update({
+      where: { id: candidateId },
+      data: {
+        rawMetadata: {
+          ...metadata,
+          productSyncStatus: status,
+          productSyncAttemptedAt: new Date().toISOString(),
+          productSyncError: error ? error.slice(0, 1000) : null,
+        },
+      },
+    });
   }
 
   async syncPriceAi() {
@@ -916,19 +1094,20 @@ export class IngestionService implements OnModuleInit {
     });
   }
 
-  private async promoteOffer(tx: Prisma.TransactionClient, runId: string, shopId: string, source: { id: string; key: string; name: string }, candidate: { id: string; externalId: string; externalProductId: string; productName: string; specification: string; category: string; price: Prisma.Decimal; currency: string; stock: number | null; offerUrl: string; observedAt: Date }) {
+  private async promoteOffer(tx: Prisma.TransactionClient, runId: string, shopId: string, source: { id: string; key: string; name: string }, candidate: { id: string; externalId: string; externalProductId: string; productName: string; specification: string; category: string; price: Prisma.Decimal; currency: string; stock: number | null; offerUrl: string; observedAt: Date; rawMetadata?: Prisma.JsonValue | null }) {
     const categorySlug = slugPart(candidate.category) || `category-${sha256(candidate.category).slice(0, 8)}`;
     const category = await tx.category.upsert({ where: { slug: categorySlug }, create: { slug: categorySlug, name: candidate.category }, update: { name: candidate.category } });
     const fingerprint = productFingerprint(candidate.productName, candidate.category);
+    const thumbnailUrl = safeHttpsUrl(typeof (isRecord(candidate.rawMetadata) ? candidate.rawMetadata.imageUrl : null) === "string" ? String((candidate.rawMetadata as Record<string, unknown>).imageUrl) : null);
     const canonical = await tx.canonicalProduct.upsert({
       where: { fingerprint },
-      create: { slug: `product-${fingerprint}`, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), summary: candidate.specification, categoryId: category.id, fingerprint },
-      update: { title: candidate.productName, summary: candidate.specification, categoryId: category.id },
+      create: { slug: `product-${fingerprint}`, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), summary: candidate.specification, thumbnailUrl, categoryId: category.id, fingerprint },
+      update: { title: candidate.productName, summary: candidate.specification, thumbnailUrl: thumbnailUrl || undefined, categoryId: category.id },
     });
     const sourceProduct = await tx.sourceProduct.upsert({
       where: { shopId_dataSourceId_sourceId: { shopId, dataSourceId: source.id, sourceId: candidate.externalProductId } },
-      create: { shopId, dataSourceId: source.id, sourceId: candidate.externalProductId, canonicalProductId: canonical.id, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), description: candidate.specification, categoryHint: candidate.category, externalUrl: candidate.offerUrl, confidence: 1 },
-      update: { canonicalProductId: canonical.id, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), description: candidate.specification, categoryHint: candidate.category, externalUrl: candidate.offerUrl, active: true },
+      create: { shopId, dataSourceId: source.id, sourceId: candidate.externalProductId, canonicalProductId: canonical.id, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), description: candidate.specification, thumbnailUrl, categoryHint: candidate.category, externalUrl: candidate.offerUrl, confidence: 1 },
+      update: { canonicalProductId: canonical.id, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), description: candidate.specification, thumbnailUrl: thumbnailUrl || undefined, categoryHint: candidate.category, externalUrl: candidate.offerUrl, active: true },
     });
     const existing = await tx.offer.findUnique({ where: { shopId_dataSourceId_externalId: { shopId, dataSourceId: source.id, externalId: candidate.externalId } } });
     const offer = await tx.offer.upsert({
@@ -976,6 +1155,23 @@ export function parseLdxpSchedule(input: unknown) {
     throw new BadRequestException("采集间隔必须为 30-1440 分钟的整数");
   }
   return { enabled, intervalMinutes };
+}
+
+export function parseLdxpProductBackfillInput(input: unknown) {
+  const rawBatchSize = (input as { batchSize?: unknown })?.batchSize;
+  const batchSize = rawBatchSize === undefined || rawBatchSize === "" ? 25 : Number(rawBatchSize);
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) {
+    throw new BadRequestException("每批店铺数必须为 1-100 家的整数");
+  }
+  return { batchSize };
+}
+
+export function isLdxpProductSyncPending(metadata: Prisma.JsonValue | null) {
+  return typeof (isRecord(metadata) ? metadata.productSyncedAt : null) !== "string";
+}
+
+export function isLdxp211bCandidate(metadata: Prisma.JsonValue | null) {
+  return isRecord(metadata) && metadata.discoverySource === "211b.site";
 }
 
 export function parse211bDiscoveryInput(input: unknown) {
@@ -1026,6 +1222,7 @@ async function fetch211bDirectoryPage(page: number) {
   const url = new URL("/shops", DISCOVERY_211B_ORIGIN);
   url.searchParams.set("q", "");
   if (page > 1) url.searchParams.set("page", String(page));
+  await waitFor211bRequestSlot();
   const response = await fetch(url, {
     redirect: "error",
     headers: {
@@ -1034,7 +1231,7 @@ async function fetch211bDirectoryPage(page: number) {
     },
     signal: AbortSignal.timeout(20_000),
   });
-  if (!response.ok) throw new Error(`211b 店铺目录第 ${page} 页返回 HTTP ${response.status}`);
+  assert211bResponseAllowed(response, `211b 店铺目录第 ${page} 页`);
   const contentType = response.headers.get("content-type") || "";
   if (contentType && !contentType.toLowerCase().includes("text/html")) throw new Error(`211b 店铺目录返回了非 HTML 内容: ${contentType}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
@@ -1042,134 +1239,140 @@ async function fetch211bDirectoryPage(page: number) {
   return { page, url: url.href, html: new TextDecoder().decode(bytes) };
 }
 
-async function fetchLdxpShopSnapshot(token: string) {
+async function fetch211bShopSnapshot(token: string, expectedProductCount?: number | null) {
   if (!isSafeLdxpToken(token)) throw new Error("LDXP token 不合法");
   const observedAt = new Date();
-  const info = await postLdxp("/shopApi/Shop/info", { token, category_key: null });
-  const infoRecord = isRecord(info) ? info : {};
-  const name = typeof infoRecord.nickname === "string" && infoRecord.nickname.trim() ? infoRecord.nickname.trim() : token;
-  const logoUrl = safeHttpsUrl(typeof infoRecord.avatar === "string" ? infoRecord.avatar : null);
-  const declaredTypes = Array.isArray(infoRecord.goods_type_sort)
-    ? infoRecord.goods_type_sort.filter((type): type is string => typeof type === "string" && LDXP_GOODS_TYPES.has(type))
-    : [...LDXP_GOODS_TYPES];
-  const goodsTypes = [...new Set(declaredTypes.length ? declaredTypes : [...LDXP_GOODS_TYPES])];
-  const categoryById = new Map<number, { id: number; name: string; goodsCount: number }>();
-  const items: LdxpProductItem[] = [];
+  const firstHtml = await fetch211bShopProductPage(token, 1);
+  const first = parse211bShopProducts(firstHtml, token);
+  const pagesToFetch = Math.min(100, first.totalPages);
+  if ((expectedProductCount || 0) > 0 && first.items.length === 0 && first.categories.length === 0) {
+    throw new Error(`211b 店铺 ${token} 页面未解析到商品结构，未写入完成标记`);
+  }
+  const itemsById = new Map(first.items.map((item) => [item.externalId, item]));
+  const categories = new Map(first.categories.map((category) => [category.name, category]));
 
-  for (const goodsType of goodsTypes) {
-    try {
-      const categories = await postLdxp("/shopApi/Shop/categoryList", { token, goods_type: goodsType });
-      for (const category of Array.isArray(categories) ? categories : []) {
-        if (!isRecord(category)) continue;
-        const id = Number(category.id);
-        const categoryName = typeof category.name === "string" ? category.name.trim() : "";
-        if (!Number.isInteger(id) || !categoryName) continue;
-        categoryById.set(id, { id, name: categoryName, goodsCount: Math.max(0, Math.trunc(Number(category.goods_count) || 0)) });
-      }
-    } catch {
-      // Some stores expose goods without category summaries; product rows still carry category names.
-    }
-
-    let current = 1;
-    let total = Number.POSITIVE_INFINITY;
-    while ((current - 1) * LDXP_PAGE_SIZE < total && current <= 100) {
-      const data = await postLdxp("/shopApi/Shop/goodsList", {
-        token,
-        keywords: "",
-        category_id: 0,
-        goods_type: goodsType,
-        current,
-        pageSize: LDXP_PAGE_SIZE,
-      });
-      const dataRecord = isRecord(data) ? data : {};
-      const list = Array.isArray(dataRecord.list) ? dataRecord.list : [];
-      total = Number.isFinite(Number(dataRecord.total)) ? Math.max(0, Number(dataRecord.total)) : list.length;
-      for (const product of list) {
-        const item = normalizeLdxpProduct(product, token, goodsType);
-        if (!item) continue;
-        items.push(item);
-        if (item.categoryId !== null && !categoryById.has(item.categoryId)) categoryById.set(item.categoryId, { id: item.categoryId, name: item.category, goodsCount: 0 });
-      }
-      if (!list.length || current * LDXP_PAGE_SIZE >= total) break;
-      current += 1;
+  for (let page = 2; page <= pagesToFetch; page++) {
+    const parsed = parse211bShopProducts(await fetch211bShopProductPage(token, page), token);
+    for (const item of parsed.items) itemsById.set(item.externalId, item);
+    for (const category of parsed.categories) {
+      const existing = categories.get(category.name);
+      categories.set(category.name, { id: null, name: category.name, goodsCount: Math.max(existing?.goodsCount || 0, category.goodsCount) });
     }
   }
 
+  const items = [...itemsById.values()];
   const prices = items.map((item) => item.price);
-  const stock = items.reduce((sum, item) => sum + (item.stock || 0), 0);
   return {
     observedAt,
-    name,
-    logoUrl,
+    name: first.name || token,
+    logoUrl: first.logoUrl,
     items,
-    categories: [...categoryById.values()].sort((a, b) => b.goodsCount - a.goodsCount || a.name.localeCompare(b.name, "zh-CN")),
-    stock,
+    categories: [...categories.values()].sort((a, b) => b.goodsCount - a.goodsCount || a.name.localeCompare(b.name, "zh-CN")),
+    stock: items.reduce((sum, item) => sum + (item.stock || 0), 0),
     minPrice: prices.length ? Math.min(...prices) : 0,
     maxPrice: prices.length ? Math.max(...prices) : 0,
   };
 }
 
-async function postLdxp(endpoint: string, body: Record<string, unknown>) {
-  if (!LDXP_ALLOWED_ENDPOINTS.has(endpoint)) throw new Error(`Blocked LDXP endpoint: ${endpoint}`);
-  await waitForLdxpRequestSlot();
-  const response = await fetch(`${LDXP_API_ORIGIN}${endpoint}`, {
-    method: "POST",
+async function fetch211bShopProductPage(token: string, page: number) {
+  const url = new URL(`/shops/${encodeURIComponent(token)}`, DISCOVERY_211B_ORIGIN);
+  if (page > 1) url.searchParams.set("page", String(page));
+  await waitFor211bRequestSlot();
+  const response = await fetch(url, {
     redirect: "error",
     headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      origin: LDXP_API_ORIGIN,
-      referer: `${LDXP_API_ORIGIN}/`,
-      "user-agent": process.env.CRAWLER_USER_AGENT || "AIKawangBot/0.1 (public shop sync; contact site admin)",
+      accept: "text/html,application/xhtml+xml",
+      "user-agent": process.env.CRAWLER_USER_AGENT || "AIKawangBot/0.1 (public 211b product backfill; contact site admin)",
     },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(25_000),
   });
-  if (!response.ok) throw new Error(`${endpoint} 返回 HTTP ${response.status}`);
+  assert211bResponseAllowed(response, `211b 店铺 ${token} 第 ${page} 页`);
   const contentType = response.headers.get("content-type") || "";
-  if (!contentType.toLowerCase().includes("application/json")) throw new Error(`${endpoint} 返回了非 JSON 内容`);
+  if (contentType && !contentType.toLowerCase().includes("text/html")) throw new Error(`211b 店铺页返回了非 HTML 内容: ${contentType}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > 8 * 1024 * 1024) throw new Error(`${endpoint} 响应超过 8 MB`);
-  const payload = JSON.parse(new TextDecoder().decode(bytes));
-  if (!isRecord(payload) || payload.code !== 1) throw new Error(`${endpoint} 请求失败: ${isRecord(payload) && typeof payload.msg === "string" ? payload.msg : "unknown"}`);
-  return payload.data;
+  if (bytes.byteLength > 4 * 1024 * 1024) throw new Error("211b 店铺商品页超过 4 MB，已停止采集");
+  return new TextDecoder().decode(bytes);
 }
 
-async function waitForLdxpRequestSlot() {
-  const previous = ldxpRequestGate;
+async function waitFor211bRequestSlot() {
+  const previous = shop211bRequestGate;
   let release!: () => void;
-  ldxpRequestGate = new Promise((resolveGate) => { release = resolveGate; });
+  shop211bRequestGate = new Promise((resolveGate) => { release = resolveGate; });
   await previous;
-  const wait = Math.max(0, nextLdxpRequestAt - Date.now());
+  const wait = Math.max(0, next211bRequestAt - Date.now());
   if (wait) await sleep(wait);
-  nextLdxpRequestAt = Date.now() + LDXP_REQUEST_DELAY_MS;
+  next211bRequestAt = Date.now() + sourceRequestDelayMs();
   release();
 }
 
-function normalizeLdxpProduct(value: unknown, token: string, goodsType: string): LdxpProductItem | null {
-  if (!isRecord(value)) return null;
-  const key = typeof value.goods_key === "string" ? value.goods_key.trim() : "";
-  const name = typeof value.name === "string" ? stripHtml(value.name).trim() : "";
-  const price = Number(value.price);
-  const categoryRecord = isRecord(value.category) ? value.category : {};
-  const category = typeof categoryRecord.name === "string" && categoryRecord.name.trim() ? categoryRecord.name.trim() : "其他";
-  const categoryId = Number(categoryRecord.id);
-  const extend = isRecord(value.extend) ? value.extend : {};
-  const stockValue = Number(extend.stock_count);
-  const stock = Number.isFinite(stockValue) ? Math.max(0, Math.trunc(stockValue)) : null;
-  if (!/^[A-Za-z0-9_-]{1,100}$/.test(key) || !name || !Number.isFinite(price) || price < 0 || price > 1_000_000) return null;
-  return {
-    externalId: `ldxp:${key}`,
-    productName: name,
-    category,
-    price,
-    stock,
-    stockStatus: stock === 0 ? "out_of_stock" : "in_stock",
-    offerUrl: `${LDXP_API_ORIGIN}/item/${encodeURIComponent(key)}`,
-    imageUrl: safeHttpsUrl(typeof value.image === "string" ? value.image : null),
-    goodsType,
-    categoryId: Number.isInteger(categoryId) ? categoryId : null,
-  };
+function sourceRequestDelayMs() {
+  const value = Number(process.env.SOURCE_211B_REQUEST_DELAY_MS || 3_000);
+  return Number.isFinite(value) ? Math.min(60_000, Math.max(1_000, Math.round(value))) : 3_000;
+}
+
+function assert211bResponseAllowed(response: Response, label: string) {
+  if (response.ok) return;
+  if (response.status === 429 || response.status === 403) {
+    const retryAfterAt = parseRetryAfter(response.headers.get("retry-after"));
+    const retryHint = retryAfterAt ? `，建议 ${retryAfterAt.toISOString()} 后重试` : "，请等待 IP 限流解除后手动重试";
+    throw new SourceRateLimitError(`${label}返回 HTTP ${response.status}${retryHint}`, retryAfterAt);
+  }
+  throw new Error(`${label}返回 HTTP ${response.status}`);
+}
+
+function parseRetryAfter(value: string | null) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return new Date(Date.now() + seconds * 1_000);
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : null;
+}
+
+export function parse211bShopProducts(html: string, token: string) {
+  if (!isSafeLdxpToken(token)) throw new Error("LDXP token 不合法");
+  const name = textFromFirstTag(/<div class="shop-profile">([\s\S]*?)<\/div>\s*<\/div>/.exec(html)?.[1] || html, "h1") || token;
+  const profile = /<div class="shop-profile">([\s\S]*?)<\/div>\s*<\/div>/.exec(html)?.[1] || "";
+  const logoUrl = safeHttpsUrl(/<img\s+[^>]*src="([^"]+)"[^>]*>/i.exec(profile)?.[1] || null);
+  const totalPages = Math.max(1, Number(/第\s*\d+\s*\/\s*(\d+)\s*页/.exec(html)?.[1] || 1));
+  const items: LdxpProductItem[] = [];
+  const categories: Array<{ id: null; name: string; goodsCount: number }> = [];
+  const categoryPattern = /<div class="category-block">([\s\S]*?)(?=<div class="category-block">|<nav class="pagination"|<\/section>)/g;
+  let categoryMatch: RegExpExecArray | null;
+  while ((categoryMatch = categoryPattern.exec(html))) {
+    const categoryBody = categoryMatch[1];
+    const category = textFromFirstTag(categoryBody, "h2") || "其他";
+    const declaredCount = Number(/<span>\s*([\d,]+)\s*件商品\s*<\/span>/.exec(categoryBody)?.[1]?.replace(/,/g, "") || 0);
+    let parsedCount = 0;
+    const productPattern = /<article class="product-card">([\s\S]*?)<\/article>/g;
+    let productMatch: RegExpExecArray | null;
+    while ((productMatch = productPattern.exec(categoryBody))) {
+      const productBody = productMatch[1];
+      const offerUrl = safeHttpsUrl(/href="(https:\/\/pay\.ldxp\.cn\/item\/[^"]+)"/i.exec(productBody)?.[1] || null);
+      if (!offerUrl) continue;
+      const key = decodeURIComponent(new URL(offerUrl).pathname.replace(/^\/item\//, "").replace(/\/$/, ""));
+      const title = stripHtml(/<h3[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h3>/i.exec(productBody)?.[1] || "");
+      const price = Number(/<div class="product-footer">[\s\S]*?<strong>\s*<small>\s*¥\s*<\/small>\s*([\d,.]+)/i.exec(productBody)?.[1]?.replace(/,/g, ""));
+      if (!/^[A-Za-z0-9_-]{1,100}$/.test(key) || !title || !Number.isFinite(price) || price < 0 || price > 1_000_000) continue;
+      const stockText = stripHtml(/<span class="stock[^"]*">([\s\S]*?)<\/span>/i.exec(productBody)?.[1] || "");
+      const stockMatch = /库存\s*([\d,]+)/.exec(stockText);
+      const stock = stockMatch ? Number(stockMatch[1].replace(/,/g, "")) : /缺货/.test(stockText) ? 0 : null;
+      items.push({
+        externalId: `ldxp:${key}`,
+        productName: title,
+        category,
+        price,
+        stock,
+        stockStatus: stock === 0 ? "out_of_stock" : "in_stock",
+        offerUrl,
+        imageUrl: safeHttpsUrl(/<img\s+[^>]*src="([^"]+)"[^>]*>/i.exec(productBody)?.[1] || null),
+        goodsType: "211b-mirror",
+        categoryId: null,
+      });
+      parsedCount += 1;
+    }
+    categories.push({ id: null, name: category, goodsCount: declaredCount || parsedCount });
+  }
+  return { name, logoUrl, totalPages, items, categories };
 }
 
 function addDiscovered211bShop(target: Map<string, Discovered211bShop>, duplicates: Set<string>, shop: Discovered211bShop) {
@@ -1184,7 +1387,8 @@ function addDiscovered211bShop(target: Map<string, Discovered211bShop>, duplicat
 
 function candidateLooksLike211bDuplicate(candidate: { name: string; logoUrl: string | null; rawMetadata: Prisma.JsonValue | null }, shop: Discovered211bShop) {
   const metadata = isRecord(candidate.rawMetadata) ? candidate.rawMetadata : {};
-  const productCount = typeof metadata.productCount === "number" ? metadata.productCount : null;
+  const productCountValue = metadata.directoryProductCount ?? metadata.productCount;
+  const productCount = typeof productCountValue === "number" ? productCountValue : null;
   const minPrice = typeof metadata.minPrice === "number" ? metadata.minPrice : null;
   return normalizedText(candidate.name) === normalizedText(shop.name)
     && (candidate.logoUrl || null) === (shop.logoUrl || null)
@@ -1237,6 +1441,16 @@ function safeHttpsUrl(value: string | null) {
 function isSafeLdxpToken(value: string) { return /^[A-Za-z0-9._-]{1,100}$/.test(value); }
 function normalizedText(value: string) { return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase(); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function metadataProductCount(metadata: Prisma.JsonValue | null) {
+  if (!isRecord(metadata)) return null;
+  const value = Number(metadata.directoryProductCount ?? metadata.productCount);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+function numberValue(value: unknown) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
+function jsonFailures(value: unknown) {
+  if (!Array.isArray(value)) return [] as Array<{ token: string; error: string }>;
+  return value.flatMap((item) => isRecord(item) && typeof item.token === "string" && typeof item.error === "string" ? [{ token: item.token, error: item.error }] : []);
+}
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 async function uniqueShopSlug(tx: Prisma.TransactionClient, sourceKey: string, externalId: string) {

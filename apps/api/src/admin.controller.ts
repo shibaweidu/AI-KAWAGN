@@ -29,6 +29,8 @@ export class AdminController {
   @Post("sources/:key/schedule") scheduleSource(@Param("key") key: string, @Body() body: unknown) { return this.ingestion.setSourceSchedule(key, body); }
   @Post("sources/:key/sync") syncSource(@Param("key") key: string) { return this.ingestion.requestSourceSync(key); }
   @Post("sources/:key/discover-211b") discover211b(@Param("key") key: string, @Body() body: unknown) { return this.ingestion.discoverLdxpFrom211b(key, body); }
+  @Get("sources/:key/product-backfill") productBackfillStatus(@Param("key") key: string) { return this.ingestion.ldxpProductBackfillStatus(key); }
+  @Post("sources/:key/product-backfill") productBackfill(@Param("key") key: string, @Body() body: unknown) { return this.ingestion.requestLdxpProductBackfill(key, body); }
   @Get("runs") runs() { return this.ingestion.listRuns(); }
   @Get("hot-searches") hotSearches() { return this.ingestion.listHotSearches(); }
   @Post("hot-searches") addHotSearch(@Body() body: unknown) { return this.ingestion.addHotSearch(body); }

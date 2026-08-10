@@ -16,6 +16,7 @@ type CandidatePage = { items: Candidate[]; total: number; offerTotal: number; pa
 type Source = { id: string; key: string; name: string; kind: string; enabled: boolean; pollIntervalSeconds: number; lastCheckedAt: string | null; lastSuccessAt: string | null; lastSnapshotId: string | null; nextRunAt: string | null };
 type Run = { id: string; kind: string; status: string; createdAt: string; counts: Record<string, unknown> | null; dataSource: { name: string } };
 type DiscoveryResult = { runId: string; pages: number; totalPages: number; totalShops: number; uniqueShops: number; created: number; updated: number; unchanged: number; pageDuplicates: number; caseVariantSkipped: number; productShopsRequested?: number; productShopsSucceeded?: number; productShopsFailed?: number; productsUpserted?: number; offersPromoted?: number; categoriesSynced?: number; sampleCreated: Array<{ token: string; name: string }> };
+type ProductBackfillStatus = { totalShops: number; syncedShops: number; remainingShops: number; activeRun: { id: string; status: string; counts: Record<string, unknown> | null; createdAt: string } | null };
 type HotSearch = { id: string; term: string; position: number; active: boolean };
 type Listing = { id: string; title: string; description: string; url: string; thumbnailUrl: string | null; badge: string | null; active: boolean; position: number };
 type ListingDraft = { title: string; description: string; url: string; thumbnailUrl: string; badge: string };
@@ -48,6 +49,7 @@ export function AdminIngestion() {
   const [projects, setProjects] = useState<Listing[]>([]);
   const [siteSettings, setSiteSettings] = useState<SiteSettings | null>(null);
   const [homeBanner, setHomeBanner] = useState<AdminHomeBanner | null>(null);
+  const [productBackfill, setProductBackfill] = useState<ProductBackfillStatus | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [newHotSearch, setNewHotSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -66,18 +68,23 @@ export function AdminIngestion() {
 
   const refresh = useCallback(async () => {
     try {
-      const [candidatePage, sourceList, runList, hotList, searchAdList, gatewayList, projectList, settings, banner] = await Promise.all([
+      const [candidatePage, sourceList, runList, hotList, searchAdList, gatewayList, projectList, settings, banner, backfill] = await Promise.all([
         request<CandidatePage>(`/candidates?status=pending&source=ldxp&pageSize=50&page=${page}`),
         request<Source[]>("/sources"), request<Run[]>("/runs"), request<HotSearch[]>("/hot-searches"),
         request<SearchAd[]>("/search-ads"),
         request<Listing[]>("/listings?type=gateway"), request<Listing[]>("/listings?type=project"),
-        request<SiteSettings>("/site-settings"), request<AdminHomeBanner>("/home-banner"),
+        request<SiteSettings>("/site-settings"), request<AdminHomeBanner>("/home-banner"), request<ProductBackfillStatus>("/sources/ldxp/product-backfill"),
       ]);
-      setCandidates(candidatePage); setSources(sourceList); setRuns(runList); setHotSearches(hotList); setSearchAds(searchAdList); setGateways(gatewayList); setProjects(projectList); setSiteSettings(settings); setHomeBanner(banner); setUnauthorized(false); setError("");
+      setCandidates(candidatePage); setSources(sourceList); setRuns(runList); setHotSearches(hotList); setSearchAds(searchAdList); setGateways(gatewayList); setProjects(projectList); setSiteSettings(settings); setHomeBanner(banner); setProductBackfill(backfill); setUnauthorized(false); setError("");
     } catch (requestError) { setError(requestError instanceof Error ? requestError.message : "加载失败"); }
   }, [page, request]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!productBackfill?.activeRun) return;
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [productBackfill?.activeRun, refresh]);
   const pendingOffers = useMemo(() => candidates?.offerTotal || 0, [candidates]);
 
   async function act(key: string, action: () => Promise<unknown>, success: string) {
@@ -103,7 +110,7 @@ export function AdminIngestion() {
       {active === "overview" && <Overview candidates={candidates} pendingOffers={pendingOffers} runs={runs} sources={sources} />}
       {active === "site" && <SiteSettingsPanel settings={siteSettings} busy={busy} request={request} act={act} />}
       {active === "banner" && <HomeBannerPanel banner={homeBanner} busy={busy} request={request} act={act} />}
-      {active === "source" && <SourcePanel sources={sources} runs={runs} busy={busy} request={request} act={act} />}
+      {active === "source" && <SourcePanel sources={sources} runs={runs} productBackfill={productBackfill} busy={busy} request={request} act={act} />}
       {active === "candidates" && <CandidatesPanel candidates={candidates} selected={selected} setSelected={setSelected} page={page} setPage={setPage} busy={busy} request={request} act={act} />}
       {active === "searches" && <HotSearchPanel items={hotSearches} newTerm={newHotSearch} setNewTerm={setNewHotSearch} busy={busy} request={request} act={act} />}
       {active === "ads" && <SearchAdPanel items={searchAds} busy={busy} request={request} act={act} />}
@@ -203,12 +210,12 @@ function HomeBannerPanel({ banner, busy, request, act }: { banner: AdminHomeBann
   </div>;
 }
 
-function SourcePanel({ sources, runs, busy, request, act }: { sources: Source[]; runs: Run[]; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
+function SourcePanel({ sources, runs, productBackfill, busy, request, act }: { sources: Source[]; runs: Run[]; productBackfill: ProductBackfillStatus | null; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
   const source = sources[0];
   const [enabled, setEnabled] = useState(false);
   const [intervalMinutes, setIntervalMinutes] = useState("360");
   const [discoveryPages, setDiscoveryPages] = useState("20");
-  const [maxProductShops, setMaxProductShops] = useState("5");
+  const [backfillBatchSize, setBackfillBatchSize] = useState("25");
   const [discoveryResult, setDiscoveryResult] = useState<DiscoveryResult | null>(null);
   useEffect(() => {
     if (!source) return;
@@ -220,12 +227,11 @@ function SourcePanel({ sources, runs, busy, request, act }: { sources: Source[];
     <section className="admin-panel source-focus"><div className="source-focus-icon"><Database /></div><div><span className="kicker">唯一数据来源</span><h2>{source?.name || "链动小店"}</h2><p>从已收录链动店铺的公开商品列表更新价格、库存、店铺 Logo 与商品主图；新店铺可以先从 211b 公开目录发现，再进入候选审核。</p><dl><div><dt>来源域名</dt><dd>pay.ldxp.cn</dd></div><div><dt>发现入口</dt><dd>211b.site/shops</dd></div><div><dt>最近成功</dt><dd>{source?.lastSuccessAt ? formatTime(source.lastSuccessAt) : "等待首次同步"}</dd></div><div><dt>最近批次</dt><dd>{latestRun?.status || "暂无"}</dd></div></dl></div></section>
     <section className="admin-panel source-discovery-panel"><div className="admin-section-head"><div><span className="kicker"><MagnifyingGlass />店铺发现</span><h2>扫描 211b 店铺目录</h2></div><small className="admin-muted">只采集店铺 token，不抓商品详情</small></div>
       <form className="source-discovery-form" onSubmit={(event) => { event.preventDefault(); void act("source-discover-211b", async () => {
-        const result = await request<DiscoveryResult>("/sources/ldxp/discover-211b", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxPages: Number(discoveryPages), syncProducts: true, maxProductShops: Number(maxProductShops) }) });
+        const result = await request<DiscoveryResult>("/sources/ldxp/discover-211b", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxPages: Number(discoveryPages), syncProducts: false }) });
         setDiscoveryResult(result);
       }, "211b 店铺目录扫描完成，新增店铺已进入候选审核"); }}>
         <label><span>最多扫描页数</span><select value={discoveryPages} onChange={(event) => setDiscoveryPages(event.target.value)}><option value="1">1 页</option><option value="3">3 页</option><option value="5">5 页</option><option value="14">14 页</option><option value="20">20 页</option><option value="50">50 页</option></select></label>
-        <label><span>同步商品店铺数</span><select value={maxProductShops} onChange={(event) => setMaxProductShops(event.target.value)}><option value="1">1 家</option><option value="5">5 家</option><option value="20">20 家</option><option value="50">50 家</option><option value="100">100 家</option><option value="200">200 家</option><option value="0">只发现店铺</option></select></label>
-        <div className="source-discovery-note"><strong>同步策略</strong><small>扫描后按 LDXP token 拉取分类和商品；已审核店铺会同步到正式报价。</small></div>
+        <div className="source-discovery-note"><strong>扫描范围</strong><small>这里只更新店铺 token；商品目录和链接请在下方单独启动补全任务。</small></div>
         <button className="button dark" type="submit" disabled={Boolean(busy)}>{busy === "source-discover-211b" ? <ArrowsClockwise className="spin" /> : <MagnifyingGlass />}开始扫描</button>
       </form>
       {discoveryResult && <div className="source-discovery-result" aria-live="polite">
@@ -241,6 +247,20 @@ function SourcePanel({ sources, runs, busy, request, act }: { sources: Source[];
         <div><span>同步失败</span><strong>{discoveryResult.productShopsFailed ?? 0}</strong></div>
         {discoveryResult.sampleCreated.length > 0 && <p>新增示例：{discoveryResult.sampleCreated.map((item) => `${item.name} (${item.token})`).join("，")}</p>}
       </div>}
+    </section>
+    <section className="admin-panel source-backfill-panel"><div className="admin-section-head"><div><span className="kicker"><Database />商品数据</span><h2>补全剩余商品目录与链接</h2></div><span className={productBackfill?.activeRun ? "source-state active" : "source-state manual"}>{productBackfill?.activeRun ? "补全中" : productBackfill?.remainingShops ? "等待启动" : "已完成"}</span></div>
+      <div className="source-backfill-summary">
+        <div><span>店铺总数</span><strong>{productBackfill?.totalShops ?? "—"}</strong></div>
+        <div><span>已补全</span><strong>{productBackfill?.syncedShops ?? "—"}</strong></div>
+        <div><span>剩余店铺</span><strong>{productBackfill?.remainingShops ?? "—"}</strong></div>
+        <div><span>本次已处理</span><strong>{numberFromUnknown(productBackfill?.activeRun?.counts?.processedShops)}</strong></div>
+        <div><span>本次商品数</span><strong>{numberFromUnknown(productBackfill?.activeRun?.counts?.productsUpserted)}</strong></div>
+      </div>
+      <form className="source-backfill-form" onSubmit={(event) => { event.preventDefault(); void act("source-product-backfill", () => request("/sources/ldxp/product-backfill", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ batchSize: Number(backfillBatchSize) }) }), "商品补全任务已启动，Worker 将分批处理全部剩余店铺"); }}>
+        <label><span>每批店铺数</span><select value={backfillBatchSize} onChange={(event) => setBackfillBatchSize(event.target.value)} disabled={Boolean(productBackfill?.activeRun)}><option value="10">10 家</option><option value="25">25 家</option><option value="50">50 家</option><option value="100">100 家</option></select></label>
+        <div><strong>{productBackfill?.activeRun ? `任务 ${productBackfill.activeRun.status}` : "自动续跑"}</strong><small>分类、商品链接、价格、库存和图片将按店铺唯一标识更新。</small></div>
+        <button className="button dark" type="submit" disabled={Boolean(busy) || Boolean(productBackfill?.activeRun) || !productBackfill?.remainingShops}>{busy === "source-product-backfill" || productBackfill?.activeRun ? <ArrowsClockwise className="spin" /> : <Play />}{productBackfill?.activeRun ? "正在补全" : productBackfill?.remainingShops ? "补全全部剩余商品" : "商品已补全"}</button>
+      </form>
     </section>
     <section className="admin-panel source-schedule-panel"><div className="admin-section-head"><div><span className="kicker"><Timer />自动更新</span><h2>采集计划</h2></div><span className={source?.enabled ? "source-state active" : "source-state manual"}>{source?.enabled ? "运行中" : "已停用"}</span></div>
       <form className="source-schedule-form" onSubmit={(event) => { event.preventDefault(); void act("source-schedule", () => request("/sources/ldxp/schedule", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled, intervalMinutes: Number(intervalMinutes) }) }), enabled ? "自动采集计划已保存" : "自动采集已停用"); }}>
@@ -326,3 +346,4 @@ function toDatetimeLocal(value: string | null) {
 }
 
 function formatTime(value: string) { return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Shanghai" }).format(new Date(value)); }
+function numberFromUnknown(value: unknown) { return Number.isFinite(Number(value)) ? Number(value).toLocaleString("zh-CN") : "0"; }

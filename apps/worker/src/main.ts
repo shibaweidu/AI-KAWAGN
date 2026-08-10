@@ -27,12 +27,35 @@ const indexWorker = new Worker("index-outbox", async () => {
 const ldxpWorker = new Worker("ldxp-sync", async (job) => {
   const source = await prisma.dataSource.findUnique({ where: { key: "ldxp" } });
   if (!source) return { skipped: "source_missing" };
+  const backfill = await prisma.ingestionRun.findFirst({
+    where: { dataSourceId: source.id, kind: "ldxp-product-backfill", status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } },
+    orderBy: { createdAt: "asc" },
+  });
+  if (backfill) {
+    try {
+      return await refreshLdxpProductBackfill(backfill.id);
+    } catch (error) {
+      const finalAttempt = job.attemptsMade + 1 >= Number(job.opts.attempts || 1);
+      if (finalAttempt) {
+        await prisma.ingestionRun.update({
+          where: { id: backfill.id },
+          data: {
+            status: SyncStatus.FAILED,
+            finishedAt: new Date(),
+            errorCode: error instanceof Error ? error.name : "UnknownError",
+            errorMessage: String(error instanceof Error ? error.message : error).slice(0, 2000),
+          },
+        });
+      }
+      throw error;
+    }
+  }
   const requested = await prisma.ingestionRun.findFirst({
     where: { dataSourceId: source.id, kind: "ldxp-sync-request", status: SyncStatus.QUEUED },
     orderBy: { createdAt: "asc" },
   });
   const dueAt = (source.lastCheckedAt?.getTime() || 0) + source.pollIntervalSeconds * 1000;
-  const due = source.enabled && source.pollIntervalSeconds >= 30 * 60 && Date.now() >= dueAt;
+  const due = process.env.ENABLE_SOURCE_SCHEDULERS === "true" && source.enabled && source.pollIntervalSeconds >= 30 * 60 && Date.now() >= dueAt;
   if (!requested && !due) return { skipped: "not_due" };
   const run = requested || await prisma.ingestionRun.create({
     data: { dataSourceId: source.id, kind: "ldxp-scheduled-sync", status: SyncStatus.QUEUED },
@@ -114,6 +137,18 @@ async function refreshLdxpSnapshot() {
   return { snapshotPath, syncOutput: syncOutput.slice(-4000), importOutput: importOutput.slice(-4000) };
 }
 
+async function refreshLdxpProductBackfill(runId: string) {
+  const repoRoot = resolve(__dirname, "../../..");
+  const runner = process.env.NODE_ENV === "production"
+    ? resolve(repoRoot, "apps/api/dist/run-ldxp-product-backfill.js")
+    : require.resolve("tsx/cli");
+  const args = process.env.NODE_ENV === "production"
+    ? [runner, `--run-id=${runId}`]
+    : [runner, resolve(repoRoot, "apps/api/src/run-ldxp-product-backfill.ts"), `--run-id=${runId}`];
+  const output = await runNode(args, repoRoot);
+  return { runId, output: output.slice(-4000) };
+}
+
 function runNode(args: string[], cwd: string) {
   return new Promise<string>((resolveRun, rejectRun) => {
     const child = spawn(process.execPath, args, { cwd, env: process.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -127,7 +162,6 @@ function runNode(args: string[], cwd: string) {
 }
 
 async function registerScheduler() {
-  if (process.env.ENABLE_SOURCE_SCHEDULERS !== "true") return;
   await indexOutboxQueue.upsertJobScheduler("outbox-every-10s", { every: 10_000 }, { name: "drain", data: {} });
   await ldxpSyncQueue.upsertJobScheduler("ldxp-source-every-minute", { every: 60_000 }, { name: "refresh", data: {} });
 }

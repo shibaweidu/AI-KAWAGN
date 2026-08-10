@@ -108,6 +108,7 @@ services:
       ENABLE_SOURCE_SCHEDULERS: ${ENABLE_SOURCE_SCHEDULERS:-false}
       LDXP_SNAPSHOT_PATH: /app/ldxp-shop-directory/data.public.json
       CRAWLER_USER_AGENT: ${CRAWLER_USER_AGENT:-AIKawangBot/0.1}
+      SOURCE_211B_REQUEST_DELAY_MS: ${SOURCE_211B_REQUEST_DELAY_MS:-3000}
     volumes:
       - ldxp-data:/app/ldxp-shop-directory
     depends_on:

@@ -28,6 +28,23 @@ ENABLE_SOURCE_SCHEDULERS=false
 
 完成来源条款确认和候选审核后，才可在受控环境中启用调度器。所有外部数据先进入候选区，批准前不会出现在公开页面。
 
+### 211b 商品补全
+
+后台“来源管理”中的店铺扫描和商品补全是两个独立操作。店铺扫描只更新来自 `211b.site` 的店铺 token；商品补全只处理该渠道中尚无 `productSyncedAt` 完成标记的店铺，并按 token 逐店写入分类、商品链接、价格、库存和图片。每家店铺事务成功后立即标记，任务中断或重新启动时会跳过已完成店铺。
+
+商品页面请求默认至少间隔 3 秒，可通过 `SOURCE_211B_REQUEST_DELAY_MS` 调大。源站返回 `429` 或 `403` 时，本批任务会立即停止，不会自动连续重试；等待 IP 限流解除后在后台重新启动，即可从剩余店铺继续。生产环境建议保持：
+
+```dotenv
+ENABLE_SOURCE_SCHEDULERS=false
+SOURCE_211B_REQUEST_DELAY_MS=5000
+```
+
+也可以在受控环境中手工执行单批，命令默认不会循环全部店铺：
+
+```bash
+pnpm --filter @ai-card/api backfill:ldxp-products -- --batch-size=10
+```
+
 ## 生产部署
 
 生产环境使用 `compose.prod.yml`。GitHub Actions 会在 `master` 更新后构建 API、Worker 和 Web 镜像并推送到 GHCR，服务器只需拉取镜像，不需要在低内存机器上编译 Next.js。

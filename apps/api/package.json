@@ -15,6 +15,7 @@
     "admin:create": "tsx src/create-admin.ts",
     "import:ldxp-directory": "tsx src/import-ldxp-directory.ts",
     "import:ldxp-products": "tsx src/import-ldxp-products.ts",
+    "backfill:ldxp-products": "tsx src/run-ldxp-product-backfill.ts",
     "data:retain-ldxp-only": "tsx src/retain-ldxp-only.ts"
   },
   "dependencies": {
