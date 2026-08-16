@@ -2,21 +2,23 @@ import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from
 import { CandidateReviewStatus, CollectionMode, DataSourceKind, ManagedListingType, Prisma, ShopStatus, SyncStatus } from "@prisma/client";
 import { createHash, randomUUID } from "node:crypto";
 import { parse as parseCsv } from "csv-parse/sync";
-import { authorizedShopSyncSchema, candidateDecisionSchema, importRowSchema, managedListingInputSchema, searchAdInputSchema, type ImportRow } from "@ai-card/contracts";
+import { ZodError } from "zod";
+import { announcementSegmentSchema, authorizedShopSyncSchema, candidateDecisionSchema, importRowSchema, managedListingInputSchema, searchAdInputSchema, type AnnouncementSegment, type ImportRow } from "@ai-card/contracts";
 import { PriceAiFeedClient, TaokayouDirectoryClient, normalizeTitle, productFingerprint } from "@ai-card/crawler";
 import { ObjectStoreService } from "./object-store.service";
 import { PrismaService } from "./prisma.service";
 
+const DISCOVERY_211B_ORIGIN = normalize211bOrigin(process.env.SOURCE_211B_ORIGIN);
 const SOURCE_DEFINITIONS = [
   {
-    key: "ldxp", name: "链动小店", kind: DataSourceKind.MANUAL_IMPORT,
-    baseUrl: "https://pay.ldxp.cn", attributionUrl: "https://pay.ldxp.cn",
+    key: "ldxp", name: "链动小店", kind: DataSourceKind.PUBLIC_DIRECTORY,
+    baseUrl: "https://pay.ldxp.cn", attributionUrl: `${DISCOVERY_211B_ORIGIN}/shops`,
     robotsUrl: null, termsUrl: null, pollIntervalSeconds: 6 * 60 * 60,
   },
 ] as const;
 
 const DEFAULT_HOT_SEARCHES = ["plus", "team", "pro", "k12", "cursor", "codex", "Claude", "kiro", "gemini", "邮箱", "接码"];
-const DISCOVERY_211B_ORIGIN = "https://211b.site";
+const LDXP_MISSING_CONFIRMATIONS = 2;
 let shop211bRequestGate = Promise.resolve();
 let next211bRequestAt = 0;
 
@@ -92,66 +94,220 @@ export class IngestionService implements OnModuleInit {
 
   async listManagedListings(raw: Record<string, unknown> = {}) {
     const type = listingType(raw.type);
-    return this.prisma.managedListing.findMany({
+    const items = await this.prisma.managedListing.findMany({
       where: { type },
       orderBy: [{ position: "asc" }, { createdAt: "desc" }],
     });
+    return items.map((item) => this.toManagedListing(item));
   }
 
-  async addManagedListing(input: unknown) {
-    const data = managedListingInputSchema.parse(input);
+  async addManagedListing(input: unknown, thumbnail?: Express.Multer.File) {
+    const data = parseManagedListingInput(input);
     const type = listingType(data.type);
     const latest = await this.prisma.managedListing.aggregate({ where: { type }, _max: { position: true } });
-    return this.prisma.managedListing.create({
-      data: {
-        type, title: data.title, description: data.description, url: data.url,
-        thumbnailUrl: data.thumbnailUrl, badge: data.badge,
-        position: (latest._max.position ?? -1) + 1,
-      },
-    });
+    const thumbnailObjectKey = thumbnail ? await this.storeManagedListingImage(thumbnail) : null;
+    try {
+      const item = await this.prisma.managedListing.create({
+        data: {
+          type, title: data.title, description: data.description, url: data.url,
+          thumbnailUrl: thumbnailObjectKey ? null : data.thumbnailUrl, thumbnailObjectKey, badge: data.badge,
+          modelTags: data.modelTags, pricingClaims: data.pricingClaims || null,
+          position: (latest._max.position ?? -1) + 1,
+        },
+      });
+      return this.toManagedListing(item);
+    } catch (error) {
+      if (thumbnailObjectKey) await this.objects.remove(thumbnailObjectKey).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async updateManagedListing(id: string, input: unknown, thumbnail?: Express.Multer.File) {
+    const current = await this.prisma.managedListing.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("展示项不存在");
+    const data = parseManagedListingInput(input);
+    if (listingType(data.type) !== current.type) throw new BadRequestException("展示类型不能修改");
+
+    let thumbnailUrl = current.thumbnailUrl;
+    let thumbnailObjectKey = current.thumbnailObjectKey;
+    let uploadedObjectKey: string | null = null;
+    if (thumbnail) {
+      uploadedObjectKey = await this.storeManagedListingImage(thumbnail);
+      thumbnailObjectKey = uploadedObjectKey;
+      thumbnailUrl = null;
+    } else if (data.clearThumbnail) {
+      thumbnailObjectKey = null;
+      thumbnailUrl = null;
+    } else if (data.thumbnailUrl) {
+      thumbnailObjectKey = null;
+      thumbnailUrl = data.thumbnailUrl;
+    }
+
+    let item;
+    try {
+      item = await this.prisma.managedListing.update({
+        where: { id },
+        data: { title: data.title, description: data.description, url: data.url, badge: data.badge, modelTags: data.modelTags, pricingClaims: data.pricingClaims || null, thumbnailUrl, thumbnailObjectKey },
+      });
+    } catch (error) {
+      if (uploadedObjectKey) await this.objects.remove(uploadedObjectKey).catch(() => undefined);
+      throw error;
+    }
+    if (current.thumbnailObjectKey && current.thumbnailObjectKey !== thumbnailObjectKey) {
+      await this.objects.remove(current.thumbnailObjectKey).catch(() => undefined);
+    }
+    return this.toManagedListing(item);
   }
 
   async toggleManagedListing(id: string) {
     const item = await this.prisma.managedListing.findUnique({ where: { id } });
     if (!item) throw new NotFoundException("展示项不存在");
-    return this.prisma.managedListing.update({ where: { id }, data: { active: !item.active } });
+    return this.toManagedListing(await this.prisma.managedListing.update({ where: { id }, data: { active: !item.active } }));
   }
 
   async reorderManagedListings(input: unknown) {
     const ids = (input as { ids?: unknown })?.ids;
     if (!Array.isArray(ids) || !ids.length || !ids.every((id) => typeof id === "string")) throw new BadRequestException("请选择有效的展示顺序");
     await this.prisma.$transaction(ids.map((id, position) => this.prisma.managedListing.update({ where: { id }, data: { position } })));
-    return this.prisma.managedListing.findMany({ where: { id: { in: ids } }, orderBy: { position: "asc" } });
+    const items = await this.prisma.managedListing.findMany({ where: { id: { in: ids } }, orderBy: { position: "asc" } });
+    return items.map((item) => this.toManagedListing(item));
+  }
+
+  async getManagedListingAsset(id: string) {
+    const item = await this.prisma.managedListing.findUnique({ where: { id }, select: { thumbnailObjectKey: true } });
+    if (!item?.thumbnailObjectKey) throw new NotFoundException("Asset not found");
+    try { return await this.objects.getBinary(item.thumbnailObjectKey); }
+    catch { throw new NotFoundException("Asset not found"); }
+  }
+
+  private toManagedListing(item: Prisma.ManagedListingGetPayload<object>) {
+    const { thumbnailObjectKey, ...listing } = item;
+    return {
+      ...listing,
+      type: item.type === ManagedListingType.GATEWAY ? "gateway" as const : "project" as const,
+      thumbnailUrl: thumbnailObjectKey ? `/api/v1/assets/listings/${item.id}?v=${item.updatedAt.getTime()}` : item.thumbnailUrl,
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString(),
+    };
+  }
+
+  private async storeManagedListingImage(file: Express.Multer.File) {
+    if (!file?.buffer?.length) throw new BadRequestException("请选择图片文件");
+    if (file.size > 5 * 1024 * 1024) throw new BadRequestException("图片不能超过 5 MB");
+    const extension = listingImageExtension(file.mimetype, file.buffer);
+    if (!extension) throw new BadRequestException("仅支持 PNG、JPEG 或 WebP 图片");
+    const key = `managed-listings/${Date.now()}-${randomUUID()}.${extension}`;
+    await this.objects.put(key, file.buffer, file.mimetype);
+    return key;
   }
 
   async listSearchAds() {
-    return this.prisma.searchAd.findMany({ orderBy: [{ position: "asc" }, { createdAt: "desc" }] });
+    const items = await this.prisma.searchAd.findMany({ orderBy: [{ position: "asc" }, { createdAt: "desc" }] });
+    return items.map((item) => this.toSearchAd(item));
   }
 
-  async addSearchAd(input: unknown) {
+  async addSearchAd(input: unknown, files: { backgroundImage?: Express.Multer.File[]; logo?: Express.Multer.File[] } = {}) {
     const data = searchAdInputSchema.parse(input);
     const latest = await this.prisma.searchAd.aggregate({ _max: { position: true } });
-    return this.prisma.searchAd.create({
-      data: {
-        title: data.title,
-        description: data.description,
-        url: data.url,
-        imageUrl: data.imageUrl,
-        label: data.label,
-        keywords: data.keywords,
-        global: data.global,
-        startsAt: data.startsAt,
-        endsAt: data.endsAt,
-        active: data.active,
-        position: (latest._max.position ?? -1) + 1,
-      },
-    });
+    const backgroundObjectKey = files.backgroundImage?.[0] ? await this.storeSearchAdImage("background", files.backgroundImage[0], 5 * 1024 * 1024) : null;
+    let logoObjectKey: string | null = null;
+    try {
+      logoObjectKey = files.logo?.[0] ? await this.storeSearchAdImage("logo", files.logo[0], 2 * 1024 * 1024) : null;
+      const content = normalizeSearchAdContent(data.content);
+      const item = await this.prisma.searchAd.create({
+        data: {
+          title: data.title,
+          description: plainSearchAdText(content, data.description),
+          descriptionContent: content.length ? content : Prisma.JsonNull,
+          url: data.url,
+          imageUrl: backgroundObjectKey ? null : data.backgroundImageUrl || data.imageUrl || null,
+          backgroundObjectKey,
+          logoUrl: logoObjectKey ? null : data.logoUrl || null,
+          logoObjectKey,
+          label: data.label,
+          keywords: data.keywords,
+          global: data.global,
+          startsAt: data.startsAt,
+          endsAt: data.endsAt,
+          active: data.active,
+          position: (latest._max.position ?? -1) + 1,
+        },
+      });
+      return this.toSearchAd(item);
+    } catch (error) {
+      if (backgroundObjectKey) await this.objects.remove(backgroundObjectKey).catch(() => undefined);
+      if (logoObjectKey) await this.objects.remove(logoObjectKey).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async updateSearchAd(id: string, input: unknown, files: { backgroundImage?: Express.Multer.File[]; logo?: Express.Multer.File[] } = {}) {
+    const current = await this.prisma.searchAd.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("搜索广告不存在");
+    const data = searchAdInputSchema.parse(input);
+    let backgroundObjectKey = current.backgroundObjectKey;
+    let imageUrl = current.imageUrl;
+    let logoObjectKey = current.logoObjectKey;
+    let logoUrl = current.logoUrl;
+    let uploadedBackground: string | null = null;
+    let uploadedLogo: string | null = null;
+    try {
+      if (files.backgroundImage?.[0]) {
+        uploadedBackground = await this.storeSearchAdImage("background", files.backgroundImage[0], 5 * 1024 * 1024);
+        backgroundObjectKey = uploadedBackground;
+        imageUrl = null;
+      } else if (data.clearBackgroundImage) {
+        backgroundObjectKey = null;
+        imageUrl = null;
+      } else if (data.backgroundImageUrl || data.imageUrl) {
+        backgroundObjectKey = null;
+        imageUrl = data.backgroundImageUrl || data.imageUrl || null;
+      }
+      if (files.logo?.[0]) {
+        uploadedLogo = await this.storeSearchAdImage("logo", files.logo[0], 2 * 1024 * 1024);
+        logoObjectKey = uploadedLogo;
+        logoUrl = null;
+      } else if (data.clearLogo) {
+        logoObjectKey = null;
+        logoUrl = null;
+      } else if (data.logoUrl) {
+        logoObjectKey = null;
+        logoUrl = data.logoUrl;
+      }
+      const content = normalizeSearchAdContent(data.content);
+      const item = await this.prisma.searchAd.update({
+        where: { id },
+        data: {
+          title: data.title,
+          description: plainSearchAdText(content, data.description),
+          descriptionContent: content.length ? content : Prisma.JsonNull,
+          url: data.url,
+          imageUrl,
+          backgroundObjectKey,
+          logoUrl,
+          logoObjectKey,
+          label: data.label,
+          keywords: data.keywords,
+          global: data.global,
+          startsAt: data.startsAt,
+          endsAt: data.endsAt,
+          active: data.active,
+        },
+      });
+      if (current.backgroundObjectKey && current.backgroundObjectKey !== backgroundObjectKey) await this.objects.remove(current.backgroundObjectKey).catch(() => undefined);
+      if (current.logoObjectKey && current.logoObjectKey !== logoObjectKey) await this.objects.remove(current.logoObjectKey).catch(() => undefined);
+      return this.toSearchAd(item);
+    } catch (error) {
+      if (uploadedBackground) await this.objects.remove(uploadedBackground).catch(() => undefined);
+      if (uploadedLogo) await this.objects.remove(uploadedLogo).catch(() => undefined);
+      throw error;
+    }
   }
 
   async toggleSearchAd(id: string) {
     const item = await this.prisma.searchAd.findUnique({ where: { id } });
     if (!item) throw new NotFoundException("搜索广告不存在");
-    return this.prisma.searchAd.update({ where: { id }, data: { active: !item.active } });
+    return this.toSearchAd(await this.prisma.searchAd.update({ where: { id }, data: { active: !item.active } }));
   }
 
   async reorderSearchAds(input: unknown) {
@@ -159,6 +315,43 @@ export class IngestionService implements OnModuleInit {
     if (!Array.isArray(ids) || !ids.length || !ids.every((id) => typeof id === "string")) throw new BadRequestException("请选择有效的广告顺序");
     await this.prisma.$transaction(ids.map((id, position) => this.prisma.searchAd.update({ where: { id }, data: { position } })));
     return this.listSearchAds();
+  }
+
+  async getSearchAdAsset(id: string, kind: string) {
+    if (kind !== "background" && kind !== "logo") throw new NotFoundException("Asset not found");
+    const item = await this.prisma.searchAd.findUnique({ where: { id }, select: { backgroundObjectKey: true, logoObjectKey: true } });
+    const objectKey = kind === "background" ? item?.backgroundObjectKey : item?.logoObjectKey;
+    if (!objectKey) throw new NotFoundException("Asset not found");
+    try { return await this.objects.getBinary(objectKey); }
+    catch { throw new NotFoundException("Asset not found"); }
+  }
+
+  private toSearchAd(item: Prisma.SearchAdGetPayload<object>) {
+    const { backgroundObjectKey, logoObjectKey, descriptionContent, ...ad } = item;
+    const version = item.updatedAt.getTime();
+    const backgroundImageUrl = backgroundObjectKey ? `/api/v1/assets/search-ads/${item.id}/background?v=${version}` : item.imageUrl;
+    const logoUrl = logoObjectKey ? `/api/v1/assets/search-ads/${item.id}/logo?v=${version}` : item.logoUrl;
+    return {
+      ...ad,
+      imageUrl: backgroundImageUrl,
+      backgroundImageUrl,
+      logoUrl,
+      content: searchAdContent(descriptionContent, item.description),
+      startsAt: item.startsAt?.toISOString() || null,
+      endsAt: item.endsAt?.toISOString() || null,
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString(),
+    };
+  }
+
+  private async storeSearchAdImage(kind: "background" | "logo", file: Express.Multer.File, maxSize: number) {
+    if (!file?.buffer?.length) throw new BadRequestException("请选择图片文件");
+    if (file.size > maxSize) throw new BadRequestException(`图片不能超过 ${Math.round(maxSize / 1024 / 1024)} MB`);
+    const extension = listingImageExtension(file.mimetype, file.buffer);
+    if (!extension) throw new BadRequestException("仅支持 PNG、JPEG 或 WebP 图片");
+    const key = `search-ads/${kind}/${Date.now()}-${randomUUID()}.${extension}`;
+    await this.objects.put(key, file.buffer, file.mimetype);
+    return key;
   }
 
   async ensureSources() {
@@ -216,15 +409,25 @@ export class IngestionService implements OnModuleInit {
 
   async requestLdxpProductBackfill(key: string, input: unknown) {
     if (key !== "ldxp") throw new BadRequestException("仅支持链动小店商品补全");
-    const { batchSize } = parseLdxpProductBackfillInput(input);
+    const { batchSize, refreshAll, priorityTokens } = parseLdxpProductBackfillInput(input);
     const source = await this.source("ldxp");
     const existing = await this.prisma.ingestionRun.findFirst({
       where: { dataSourceId: source.id, kind: "ldxp-product-backfill", status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } },
       orderBy: { createdAt: "asc" },
     });
-    if (existing) return { accepted: true, queued: existing.status === SyncStatus.QUEUED, runId: existing.id, existing: true };
+    if (existing) {
+      if (priorityTokens.length) {
+        const counts = isRecord(existing.counts) ? existing.counts : {};
+        const currentPriorities = stringArray(counts.priorityTokens);
+        await this.prisma.ingestionRun.update({
+          where: { id: existing.id },
+          data: { counts: { ...counts, batchSize, priorityTokens: [...new Set([...priorityTokens, ...currentPriorities])].slice(0, 50) } },
+        });
+      }
+      return { accepted: true, queued: existing.status === SyncStatus.QUEUED, runId: existing.id, existing: true, priorityTokens };
+    }
     const status = await this.ldxpProductBackfillStatus(key);
-    if (!status.remainingShops) return { accepted: true, queued: false, runId: null, existing: false, complete: true };
+    if (!status.remainingShops && !refreshAll) return { accepted: true, queued: false, runId: null, existing: false, complete: true };
     const run = await this.prisma.ingestionRun.create({
       data: {
         dataSourceId: source.id,
@@ -232,6 +435,8 @@ export class IngestionService implements OnModuleInit {
         status: SyncStatus.QUEUED,
         counts: {
           batchSize,
+          refreshAll,
+          priorityTokens,
           totalAtStart: status.totalShops,
           remainingAtStart: status.remainingShops,
           processedShops: 0,
@@ -239,6 +444,7 @@ export class IngestionService implements OnModuleInit {
           failedShops: 0,
           productsUpserted: 0,
           offersPromoted: 0,
+          offersDeactivated: 0,
           categoriesSynced: 0,
           pass: 1,
         },
@@ -252,13 +458,19 @@ export class IngestionService implements OnModuleInit {
     if (!run || run.kind !== "ldxp-product-backfill" || run.dataSource.key !== "ldxp") throw new NotFoundException("商品补全任务不存在");
     if (run.status === SyncStatus.SUCCEEDED || run.status === SyncStatus.FAILED) return { runId, status: run.status, counts: run.counts };
     const counts = isRecord(run.counts) ? run.counts : {};
-    const batchSize = parseLdxpProductBackfillInput({ batchSize: counts.batchSize }).batchSize;
+    const { batchSize, refreshAll, priorityTokens } = parseLdxpProductBackfillInput({ batchSize: counts.batchSize, refreshAll: counts.refreshAll, priorityTokens: counts.priorityTokens });
     const pass = Math.max(1, numberValue(counts.pass));
     const lastCandidateId = typeof counts.lastCandidateId === "string" ? counts.lastCandidateId : null;
+    const refreshStartedAt = run.startedAt || run.createdAt;
     const candidates = await this.ldxpBackfillCandidates(run.dataSourceId);
-    const pending = candidates.filter((candidate) => isLdxpProductSyncPending(candidate.rawMetadata));
-    const available = pending.filter((candidate) => !lastCandidateId || candidate.id > lastCandidateId);
-    const targets = available.slice(0, batchSize);
+    const needsSync = (candidate: LdxpBackfillCandidate) => isLdxpProductSyncDue(candidate.rawMetadata, refreshAll, refreshStartedAt);
+    const pending = candidates.filter(needsSync);
+    const prioritized = priorityTokens
+      .map((token) => pending.find((candidate) => candidate.token === token))
+      .filter((candidate): candidate is LdxpBackfillCandidate => Boolean(candidate));
+    const priorityIds = new Set(prioritized.map((candidate) => candidate.id));
+    const available = pending.filter((candidate) => !priorityIds.has(candidate.id) && (!lastCandidateId || candidate.id > lastCandidateId));
+    const targets = [...prioritized, ...available].slice(0, batchSize);
 
     if (!targets.length) {
       const retry = pending.length > 0 && pass < 3;
@@ -283,8 +495,7 @@ export class IngestionService implements OnModuleInit {
       result = await this.hydrateLdxpProductsForCandidates(run.dataSource, run.id, targets);
     } catch (error) {
       if (!(error instanceof SourceRateLimitError)) throw error;
-      const remainingShops = (await this.ldxpBackfillCandidates(run.dataSourceId))
-        .filter((candidate) => isLdxpProductSyncPending(candidate.rawMetadata)).length;
+      const remainingShops = (await this.ldxpBackfillCandidates(run.dataSourceId)).filter(needsSync).length;
       const finalCounts = {
         ...counts,
         batchSize,
@@ -306,9 +517,8 @@ export class IngestionService implements OnModuleInit {
       return { runId, status: SyncStatus.FAILED, counts: finalCounts };
     }
     const lastProcessed = targets[targets.length - 1].id;
-    const remainingAfterBatch = (await this.ldxpBackfillCandidates(run.dataSourceId))
-      .filter((candidate) => isLdxpProductSyncPending(candidate.rawMetadata)).length;
-    const hasMoreInThisPass = candidates.some((candidate) => candidate.id > lastProcessed && isLdxpProductSyncPending(candidate.rawMetadata));
+    const remainingAfterBatch = (await this.ldxpBackfillCandidates(run.dataSourceId)).filter(needsSync).length;
+    const hasMoreInThisPass = candidates.some((candidate) => candidate.id > lastProcessed && needsSync(candidate));
     const retry = !hasMoreInThisPass && remainingAfterBatch > 0 && pass < 3;
     const finalCounts = {
       ...counts,
@@ -320,6 +530,7 @@ export class IngestionService implements OnModuleInit {
       failedShops: numberValue(counts.failedShops) + result.productShopsFailed,
       productsUpserted: numberValue(counts.productsUpserted) + result.productsUpserted,
       offersPromoted: numberValue(counts.offersPromoted) + result.offersPromoted,
+      offersDeactivated: numberValue(counts.offersDeactivated) + result.offersDeactivated,
       categoriesSynced: numberValue(counts.categoriesSynced) + result.categoriesSynced,
       remainingShops: remainingAfterBatch,
       failures: [...jsonFailures(counts.failures), ...result.failures].slice(-100),
@@ -424,7 +635,7 @@ export class IngestionService implements OnModuleInit {
               dataSourceId: source.id,
               externalId: shop.token,
               name: shop.name,
-              directoryUrl: shop.originalShopUrl,
+              directoryUrl: shop.mirrorUrl,
               homepageUrl: shop.originalShopUrl,
               logoUrl: shop.logoUrl,
               sourceSyncedAt: observedAt,
@@ -433,7 +644,7 @@ export class IngestionService implements OnModuleInit {
             },
             update: {
               name: shop.name,
-              directoryUrl: shop.originalShopUrl,
+              directoryUrl: shop.mirrorUrl,
               homepageUrl: shop.originalShopUrl,
               logoUrl: shop.logoUrl,
               sourceSyncedAt: observedAt,
@@ -485,7 +696,7 @@ export class IngestionService implements OnModuleInit {
       }, { timeout: 120_000 });
       const productSync = syncProducts && result.hydrateTargets.length
         ? await this.hydrateLdxpProductsForCandidates(source, run.id, result.hydrateTargets)
-        : { productShopsRequested: 0, productShopsSucceeded: 0, productShopsFailed: 0, productsUpserted: 0, offersPromoted: 0, categoriesSynced: 0, failures: [] as Array<{ token: string; error: string }> };
+        : { productShopsRequested: 0, productShopsSucceeded: 0, productShopsFailed: 0, productsUpserted: 0, offersPromoted: 0, offersDeactivated: 0, categoriesSynced: 0, failures: [] as Array<{ token: string; error: string }> };
       const { hydrateTargets, ...publicResult } = result;
       const finalCounts = { ...publicResult, ...productSync };
       await this.prisma.ingestionRun.update({ where: { id: run.id }, data: { status: SyncStatus.SUCCEEDED, counts: finalCounts, finishedAt: new Date() } });
@@ -500,6 +711,7 @@ export class IngestionService implements OnModuleInit {
     let productShopsSucceeded = 0;
     let productsUpserted = 0;
     let offersPromoted = 0;
+    let offersDeactivated = 0;
     let categoriesSynced = 0;
     const failures: Array<{ token: string; error: string }> = [];
 
@@ -528,6 +740,7 @@ export class IngestionService implements OnModuleInit {
             productSyncStatus: "completed",
             productSyncedAt: snapshot.observedAt.toISOString(),
           };
+          const sourceAttributionUrl = `${DISCOVERY_211B_ORIGIN}/shops/${encodeURIComponent(target.token)}`;
           await tx.shopCandidate.update({
             where: { id: candidate.id },
             data: {
@@ -557,6 +770,7 @@ export class IngestionService implements OnModuleInit {
                 stock: item.stock,
                 stockStatus: item.stockStatus,
                 offerUrl: item.offerUrl,
+                sourceAttributionUrl,
                 observedAt: snapshot.observedAt,
                 ingestionRunId: runId,
                 active: true,
@@ -570,6 +784,7 @@ export class IngestionService implements OnModuleInit {
                 stock: item.stock,
                 stockStatus: item.stockStatus,
                 offerUrl: item.offerUrl,
+                sourceAttributionUrl,
                 observedAt: snapshot.observedAt,
                 ingestionRunId: runId,
                 active: true,
@@ -583,10 +798,50 @@ export class IngestionService implements OnModuleInit {
             where: { shopCandidateId: candidate.id, active: true, externalId: { notIn: seenOfferIds } },
             data: { missingCount: { increment: 1 } },
           });
-          await tx.offerCandidate.updateMany({ where: { shopCandidateId: candidate.id, missingCount: { gte: 2 } }, data: { active: false } });
+          const missingCandidates = await tx.offerCandidate.findMany({
+            where: { shopCandidateId: candidate.id, active: true, missingCount: { gte: LDXP_MISSING_CONFIRMATIONS } },
+            select: { id: true, externalId: true, externalProductId: true },
+          });
+          if (missingCandidates.length) {
+            await tx.offerCandidate.updateMany({
+              where: { id: { in: missingCandidates.map((item) => item.id) } },
+              data: { active: false },
+            });
+          }
 
           let promoted = 0;
+          let deactivated = 0;
           if (candidate.approvedShopId && (candidate.reviewStatus === CandidateReviewStatus.APPROVED || candidate.reviewStatus === CandidateReviewStatus.MERGED)) {
+            if (missingCandidates.length) {
+              const publishedOffers = await tx.offer.findMany({
+                where: {
+                  shopId: candidate.approvedShopId,
+                  dataSourceId: source.id,
+                  externalId: { in: missingCandidates.map((item) => item.externalId) },
+                  active: true,
+                },
+                select: { id: true, sourceProductId: true, canonicalProductId: true },
+              });
+              if (publishedOffers.length) {
+                await tx.offer.updateMany({
+                  where: { id: { in: publishedOffers.map((offer) => offer.id) } },
+                  data: { active: false, syncedAt: snapshot.observedAt },
+                });
+                const sourceProductIds = [...new Set(publishedOffers.map((offer) => offer.sourceProductId))];
+                await tx.sourceProduct.updateMany({
+                  where: { id: { in: sourceProductIds }, offers: { none: { active: true } } },
+                  data: { active: false },
+                });
+                await tx.outboxEvent.createMany({
+                  data: publishedOffers.map((offer) => ({
+                    topic: "offer.updated",
+                    aggregateId: offer.id,
+                    payload: { offerId: offer.id, productId: offer.canonicalProductId, active: false, reason: "missing_from_two_successful_snapshots" },
+                  })),
+                });
+                deactivated = publishedOffers.length;
+              }
+            }
             const activeOffers = await tx.offerCandidate.findMany({ where: { shopCandidateId: candidate.id, active: true } });
             for (const offerCandidate of activeOffers) {
               await this.promoteOffer(tx, runId, candidate.approvedShopId, source, offerCandidate);
@@ -594,11 +849,12 @@ export class IngestionService implements OnModuleInit {
             }
             await tx.shop.update({ where: { id: candidate.approvedShopId }, data: { lastSyncedAt: snapshot.observedAt } });
           }
-          return { upserted, promoted };
+          return { upserted, promoted, deactivated };
         }, { timeout: 120_000 });
         productShopsSucceeded += 1;
         productsUpserted += result.upserted;
         offersPromoted += result.promoted;
+        offersDeactivated += result.deactivated;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await this.markLdxpProductSyncState(target.id, "failed", message).catch(() => undefined);
@@ -613,6 +869,7 @@ export class IngestionService implements OnModuleInit {
       productShopsFailed: failures.length,
       productsUpserted,
       offersPromoted,
+      offersDeactivated,
       categoriesSynced,
       failures: failures.slice(0, 20),
     };
@@ -954,7 +1211,7 @@ export class IngestionService implements OnModuleInit {
           data: {
             slug: await uniqueShopSlug(tx, candidate.dataSource.key, candidate.externalId), name: candidate.name,
             description: "数据来自已审核的公开来源，交易与交付由原店负责。", logoUrl: candidate.logoUrl,
-            homepageUrl, adapterKind: candidate.dataSource.key === "priceai" ? "priceai-feed" : "authorized-direct",
+            homepageUrl, adapterKind: candidate.dataSource.key === "priceai" ? "priceai-feed" : candidate.dataSource.key === "ldxp" ? "211b-public-directory" : "authorized-direct",
             status: ShopStatus.ACTIVE, verifiedAt: new Date(), publishedAt: new Date(), lastSyncedAt: candidate.sourceSyncedAt, trustScore: 50,
           },
         });
@@ -966,7 +1223,7 @@ export class IngestionService implements OnModuleInit {
             collectionMode: sourceCollectionMode(candidate.dataSource.key), attributionLabel: candidate.dataSource.name,
             authorizationEvidence: decision.authorizationEvidence,
           },
-          update: { shopId: shop.id, authorizationEvidence: decision.authorizationEvidence },
+          update: { shopId: shop.id, collectionMode: sourceCollectionMode(candidate.dataSource.key), attributionLabel: candidate.dataSource.name, authorizationEvidence: decision.authorizationEvidence },
         });
         await tx.importChange.create({ data: { ingestionRunId: run.id, entityType: "SHOP", entityId: shop.id, action: existingShop ? "UPDATE" : "CREATE", before: existingShop ? { status: existingShop.status, publishedAt: existingShop.publishedAt?.toISOString() || null } : Prisma.JsonNull, after: { status: "ACTIVE" } } });
         for (const offerCandidate of candidate.offerCandidates) await this.promoteOffer(tx, run.id, shop.id, candidate.dataSource, offerCandidate);
@@ -1094,7 +1351,7 @@ export class IngestionService implements OnModuleInit {
     });
   }
 
-  private async promoteOffer(tx: Prisma.TransactionClient, runId: string, shopId: string, source: { id: string; key: string; name: string }, candidate: { id: string; externalId: string; externalProductId: string; productName: string; specification: string; category: string; price: Prisma.Decimal; currency: string; stock: number | null; offerUrl: string; observedAt: Date; rawMetadata?: Prisma.JsonValue | null }) {
+  private async promoteOffer(tx: Prisma.TransactionClient, runId: string, shopId: string, source: { id: string; key: string; name: string }, candidate: { id: string; externalId: string; externalProductId: string; productName: string; specification: string; category: string; price: Prisma.Decimal; currency: string; stock: number | null; offerUrl: string; sourceAttributionUrl?: string | null; observedAt: Date; rawMetadata?: Prisma.JsonValue | null }) {
     const categorySlug = slugPart(candidate.category) || `category-${sha256(candidate.category).slice(0, 8)}`;
     const category = await tx.category.upsert({ where: { slug: categorySlug }, create: { slug: categorySlug, name: candidate.category }, update: { name: candidate.category } });
     const fingerprint = productFingerprint(candidate.productName, candidate.category);
@@ -1112,8 +1369,8 @@ export class IngestionService implements OnModuleInit {
     const existing = await tx.offer.findUnique({ where: { shopId_dataSourceId_externalId: { shopId, dataSourceId: source.id, externalId: candidate.externalId } } });
     const offer = await tx.offer.upsert({
       where: { shopId_dataSourceId_externalId: { shopId, dataSourceId: source.id, externalId: candidate.externalId } },
-      create: { shopId, sourceProductId: sourceProduct.id, canonicalProductId: canonical.id, dataSourceId: source.id, externalId: candidate.externalId, collectionMode: sourceCollectionMode(source.key), price: candidate.price, stock: candidate.stock, currency: candidate.currency, active: true, sourceUrl: candidate.offerUrl, sourceObservedAt: candidate.observedAt, syncedAt: new Date() },
-      update: { sourceProductId: sourceProduct.id, canonicalProductId: canonical.id, price: candidate.price, stock: candidate.stock, currency: candidate.currency, active: true, sourceUrl: candidate.offerUrl, sourceObservedAt: candidate.observedAt, syncedAt: new Date() },
+      create: { shopId, sourceProductId: sourceProduct.id, canonicalProductId: canonical.id, dataSourceId: source.id, externalId: candidate.externalId, collectionMode: sourceCollectionMode(source.key), price: candidate.price, stock: candidate.stock, currency: candidate.currency, active: true, sourceUrl: candidate.offerUrl, sourceAttributionUrl: candidate.sourceAttributionUrl, sourceObservedAt: candidate.observedAt, syncedAt: new Date() },
+      update: { sourceProductId: sourceProduct.id, canonicalProductId: canonical.id, collectionMode: sourceCollectionMode(source.key), price: candidate.price, stock: candidate.stock, currency: candidate.currency, active: true, sourceUrl: candidate.offerUrl, sourceAttributionUrl: candidate.sourceAttributionUrl, sourceObservedAt: candidate.observedAt, syncedAt: new Date() },
     });
     if (!existing || !existing.price.equals(candidate.price) || existing.stock !== candidate.stock) await tx.priceHistory.create({ data: { offerId: offer.id, price: candidate.price, stock: candidate.stock, capturedAt: candidate.observedAt } });
     await tx.importChange.create({ data: { ingestionRunId: runId, entityType: "OFFER", entityId: offer.id, action: existing ? "UPDATE" : "CREATE", before: existing ? { price: existing.price.toNumber(), stock: existing.stock, active: existing.active, sourceObservedAt: existing.sourceObservedAt.toISOString() } : Prisma.JsonNull, after: { price: candidate.price.toNumber(), stock: candidate.stock, active: true } } });
@@ -1159,15 +1416,35 @@ export function parseLdxpSchedule(input: unknown) {
 
 export function parseLdxpProductBackfillInput(input: unknown) {
   const rawBatchSize = (input as { batchSize?: unknown })?.batchSize;
+  const rawRefreshAll = (input as { refreshAll?: unknown })?.refreshAll;
+  const rawPriorityTokens = (input as { priorityTokens?: unknown })?.priorityTokens;
   const batchSize = rawBatchSize === undefined || rawBatchSize === "" ? 25 : Number(rawBatchSize);
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) {
     throw new BadRequestException("每批店铺数必须为 1-100 家的整数");
   }
-  return { batchSize };
+  if (rawRefreshAll !== undefined && typeof rawRefreshAll !== "boolean") {
+    throw new BadRequestException("refreshAll 必须为布尔值");
+  }
+  if (rawPriorityTokens !== undefined && (!Array.isArray(rawPriorityTokens) || rawPriorityTokens.length > 50 || rawPriorityTokens.some((token) => typeof token !== "string" || !isSafeLdxpToken(token)))) {
+    throw new BadRequestException("priorityTokens 必须是最多 50 个合法店铺 Token");
+  }
+  return { batchSize, refreshAll: rawRefreshAll === true, priorityTokens: rawPriorityTokens as string[] | undefined || [] };
 }
 
 export function isLdxpProductSyncPending(metadata: Prisma.JsonValue | null) {
-  return typeof (isRecord(metadata) ? metadata.productSyncedAt : null) !== "string";
+  if (!isRecord(metadata)) return true;
+  return metadata.productSyncStatus === "failed" || typeof metadata.productSyncedAt !== "string";
+}
+
+export function shouldDeactivateMissingLdxpOffer(missingCount: number) {
+  return Number.isInteger(missingCount) && missingCount >= LDXP_MISSING_CONFIRMATIONS;
+}
+
+export function isLdxpProductSyncDue(metadata: Prisma.JsonValue | null, refreshAll: boolean, refreshStartedAt: Date) {
+  if (isLdxpProductSyncPending(metadata)) return true;
+  if (!refreshAll) return false;
+  const syncedAt = Date.parse(String((metadata as Record<string, unknown>).productSyncedAt));
+  return !Number.isFinite(syncedAt) || syncedAt < refreshStartedAt.getTime();
 }
 
 export function isLdxp211bCandidate(metadata: Prisma.JsonValue | null) {
@@ -1186,6 +1463,14 @@ export function parse211bDiscoveryInput(input: unknown) {
     throw new BadRequestException("同步商品店铺数必须为 0-200 家的整数");
   }
   return { maxPages: rawMaxPages, syncProducts, maxProductShops: rawMaxProductShops };
+}
+
+export function normalize211bOrigin(value?: string) {
+  const url = new URL(value?.trim() || "https://2dou.org");
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || (url.pathname && url.pathname !== "/")) {
+    throw new Error("SOURCE_211B_ORIGIN 必须是无路径、无账号信息的 HTTPS 域名");
+  }
+  return url.origin;
 }
 
 export function parse211bShopDirectory(html: string) {
@@ -1451,6 +1736,7 @@ function jsonFailures(value: unknown) {
   if (!Array.isArray(value)) return [] as Array<{ token: string; error: string }>;
   return value.flatMap((item) => isRecord(item) && typeof item.token === "string" && typeof item.error === "string" ? [{ token: item.token, error: item.error }] : []);
 }
+function stringArray(value: unknown) { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 async function uniqueShopSlug(tx: Prisma.TransactionClient, sourceKey: string, externalId: string) {
@@ -1470,9 +1756,45 @@ function sourceScheduleView<T extends { enabled: boolean; pollIntervalSeconds: n
   return { ...source, nextRunAt };
 }
 function normalizeFeedStatus(status: string) { return /out|sold|unavailable/i.test(status) ? "out_of_stock" : /low/i.test(status) ? "low_stock" : "in_stock"; }
-function sourceCollectionMode(sourceKey: string) { return sourceKey === "priceai" ? CollectionMode.PUBLIC_FEED : sourceKey === "taokayou" ? CollectionMode.AUTHORIZED_DIRECT : CollectionMode.MANUAL; }
+function sourceCollectionMode(sourceKey: string) { return sourceKey === "priceai" ? CollectionMode.PUBLIC_FEED : sourceKey === "ldxp" ? CollectionMode.PUBLIC_DIRECTORY : sourceKey === "taokayou" ? CollectionMode.AUTHORIZED_DIRECT : CollectionMode.MANUAL; }
 function listingType(value: unknown) {
   if (value === "gateway" || value === ManagedListingType.GATEWAY) return ManagedListingType.GATEWAY;
   if (value === "project" || value === ManagedListingType.PROJECT) return ManagedListingType.PROJECT;
   throw new BadRequestException("展示类型必须是 gateway 或 project");
+}
+
+function parseManagedListingInput(input: unknown) {
+  try {
+    return managedListingInputSchema.parse(input);
+  } catch (error) {
+    if (error instanceof ZodError) {
+      throw new BadRequestException(error.issues[0]?.message || "展示项字段无效");
+    }
+    throw error;
+  }
+}
+
+function listingImageExtension(mime: string, body: Buffer) {
+  if (mime === "image/png" && body.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "png";
+  if ((mime === "image/jpeg" || mime === "image/jpg") && body[0] === 0xff && body[1] === 0xd8 && body.at(-2) === 0xff && body.at(-1) === 0xd9) return "jpg";
+  if (mime === "image/webp" && body.subarray(0, 4).toString("ascii") === "RIFF" && body.subarray(8, 12).toString("ascii") === "WEBP") return "webp";
+  return null;
+}
+
+function normalizeSearchAdContent(value: unknown): AnnouncementSegment[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((segment) => {
+    const parsed = announcementSegmentSchema.safeParse(segment);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function searchAdContent(value: Prisma.JsonValue | null, description: string): AnnouncementSegment[] {
+  const content = normalizeSearchAdContent(value);
+  return content.length ? content : description.trim() ? [{ text: description.trim(), bold: false, italic: false, underline: false, color: "default", href: null }] : [];
+}
+
+function plainSearchAdText(content: AnnouncementSegment[], fallback: string) {
+  const text = content.map((segment) => segment.text).join("").replace(/\s+/g, " ").trim();
+  return (text || fallback.trim()).slice(0, 300);
 }

@@ -76,9 +76,13 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
       S3_BUCKET: ${S3_BUCKET:-raw-snapshots}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      SUBMISSION_IP_HASH_SECRET: ${SUBMISSION_IP_HASH_SECRET:?SUBMISSION_IP_HASH_SECRET is required}
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+      BOT_INTERNAL_SECRET: ${BOT_INTERNAL_SECRET:?BOT_INTERNAL_SECRET is required}
+      GATEWAY_PROBE_ENCRYPTION_KEY: ${GATEWAY_PROBE_ENCRYPTION_KEY:?GATEWAY_PROBE_ENCRYPTION_KEY is required}
       WEB_ORIGIN: ${WEB_ORIGIN:?WEB_ORIGIN is required}
       DATA_MODE: database
+      ZUIQUANAPI_FEED_URL: ${ZUIQUANAPI_FEED_URL:-}
       PORT: 4000
     depends_on:
       postgres: { condition: service_healthy }
@@ -105,8 +109,11 @@ services:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?MEILI_MASTER_KEY is required}
       API_ORIGIN: http://api:4000
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+      GATEWAY_PROBE_ENCRYPTION_KEY: ${GATEWAY_PROBE_ENCRYPTION_KEY:?GATEWAY_PROBE_ENCRYPTION_KEY is required}
+      ENABLE_GATEWAY_PROBES: ${ENABLE_GATEWAY_PROBES:-false}
       ENABLE_SOURCE_SCHEDULERS: ${ENABLE_SOURCE_SCHEDULERS:-false}
       PAUSE_SOURCE_JOBS: ${PAUSE_SOURCE_JOBS:-false}
+      ZUIQUANAPI_FEED_URL: ${ZUIQUANAPI_FEED_URL:-}
       LDXP_SNAPSHOT_PATH: /app/ldxp-shop-directory/data.public.json
       CRAWLER_USER_AGENT: ${CRAWLER_USER_AGENT:-AIKawangBot/0.1}
       SOURCE_211B_REQUEST_DELAY_MS: ${SOURCE_211B_REQUEST_DELAY_MS:-3000}
@@ -122,7 +129,7 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
-    networks: [backend]
+    networks: [backend, probe-egress]
 
   web:
     build:
@@ -146,6 +153,29 @@ services:
       start_period: 15s
     networks: [frontend, backend]
 
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: bot
+    image: ${IMAGE_REGISTRY:-ghcr.io/shibaweidu}/ai-kawang-bot:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379
+      API_ORIGIN: http://api:4000
+      PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:?NEXT_PUBLIC_SITE_URL is required}
+      BOT_INTERNAL_SECRET: ${BOT_INTERNAL_SECRET:?BOT_INTERNAL_SECRET is required}
+      BOT_HASH_SECRET: ${BOT_HASH_SECRET:?BOT_HASH_SECRET is required}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_ENABLED: ${TELEGRAM_BOT_ENABLED:-false}
+      QQ_APP_ID: ${QQ_APP_ID:-}
+      QQ_CLIENT_SECRET: ${QQ_CLIENT_SECRET:-}
+      QQ_BOT_ENABLED: ${QQ_BOT_ENABLED:-false}
+    depends_on:
+      api: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [backend, probe-egress]
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -167,6 +197,7 @@ networks:
   frontend:
   backend:
     internal: true
+  probe-egress:
 
 volumes:
   postgres-data:

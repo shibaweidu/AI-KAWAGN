@@ -6,7 +6,7 @@ type MediaThumbnailProps = {
 };
 
 export function MediaThumbnail({ value, label, kind = "product", className = "" }: MediaThumbnailProps) {
-  const isImage = Boolean(value && /^https:\/\//i.test(value));
+  const isImage = Boolean(value && (/^https:\/\//i.test(value) || value.startsWith("/api/v1/assets/listings/")));
   return <span className={`media-thumbnail ${kind} ${className}`.trim()} aria-hidden="true">
     {isImage ? <img src={value!} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span>{initial(label)}</span>}
   </span>;

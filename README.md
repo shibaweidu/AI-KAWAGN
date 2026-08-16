@@ -125,11 +125,66 @@ API 容器每次启动都会先运行 `prisma migrate deploy`。数据库、Redi
 
 `.env.production`、`backups/` 和 `*.dump` 已被 Git 忽略，不要上传到 GitHub。生产环境默认关闭来源定时采集，完成来源权限确认后再设置 `ENABLE_SOURCE_SCHEDULERS=true`。
 
+### 中转站目录同步
+
+中转站目录在后台“中转站展示”中独立同步和审核，不会写入店铺、商品或人工精选表。来源页面的“加载更多”不会继续请求接口，完整站点数组已经包含在 Next.js Flight 数据中；系统会直接解析该数组，一次同步页面提供的全部唯一站点链接，无需模拟浏览器反复点击。
+
+如果授权方另行提供稳定的 HTTPS JSON Feed，也可以在 `.env.production` 中配置，配置后优先使用 Feed：
+
+```bash
+ZUIQUANAPI_FEED_URL=https://www.zuiquanapi.com/path/to/authorized-feed.json
+```
+
+更新环境变量后重新部署，然后可在后台点击“立即同步”，或在服务器执行：
+
+```bash
+docker compose --env-file .env.production -f compose.prod.yml exec -T api node dist/sync-gateway-directory.js
+```
+
+需要每 6 小时同步一次时，可将下列任务加入服务器 crontab：
+
+```cron
+0 */6 * * * cd /opt/ai-card && docker compose --env-file .env.production -f compose.prod.yml exec -T api node dist/sync-gateway-directory.js >> /var/log/ai-card-gateways.log 2>&1
+```
+
+新记录默认进入待审核，不会自动公开。完整页面数据或 Feed 连续三次不再返回某条记录时，系统才会将其标记为来源下架；解析不到完整目录时不会执行下架判断。同步记录会同时保存来源标称总数和实际唯一站点数，便于识别来源计数偏差。
+
+### 中转站模型可用性探测
+
+后台“中转站展示”每条记录右侧的齿轮按钮进入“本站模型探测”。第一版只支持 OpenAI 兼容协议：模型发现请求 `/v1/models`，真实推理请求 `/v1/chat/completions`。服务宣称的模型标签只代表来源文本，不会自动触发探测；只有配置公网 HTTPS Base URL、专用 Key，并在后台勾选的模型才会执行。
+
+启用前先生成 32 字节主密钥，并仅写入 API 与 Worker 的运行环境：
+
+```bash
+openssl rand -hex 32
+```
+
+将结果设置为 `GATEWAY_PROBE_ENCRYPTION_KEY`。默认 `ENABLE_GATEWAY_PROBES=false`，完成数据库迁移、配置专用低额度 Key 和管理员确认后，再将其改为 `true` 并重启 Worker 开启定时探测；后台手动点击“发现模型”或“立即探测”仍可用于单次验证。API 只返回 Key 是否存在和末四位提示，模型回答正文、Authorization、Base URL 机密信息不会进入公开接口或日志。401、403、402 会暂停真实推理并通知管理员，模型列表检查仍继续。
+
+原始探测结果保留 30 天，Worker 每日清理；公开详情只返回每个模型最近 48 个小时桶和脱敏错误类别。生产部署时 Worker 连接 `probe-egress` 出站网络，API、Web 不加入该网络；不要为探测 Worker 映射额外入站端口。
+
+### 群机器人
+
+群机器人作为独立的 `apps/bot` 服务运行。首版支持 Telegram 官方 Bot API 的 long polling，QQ 仅保留官方开放平台适配器，不使用模拟登录或非官方协议。机器人默认关闭且没有 Token 时不会连接 Telegram，后台的“机器人接入”仍可用于配置群白名单和预览真实商品组回复。
+
+在服务器环境变量中配置以下项目，然后重启 API 和 Bot 服务：
+
+```bash
+BOT_INTERNAL_SECRET=<独立随机密钥>
+BOT_HASH_SECRET=<另一条独立随机密钥>
+PUBLIC_SITE_URL=https://example.com
+TELEGRAM_BOT_TOKEN=<BotFather 提供的 Token>
+TELEGRAM_BOT_ENABLED=true
+```
+
+随后在后台启用 Telegram，在目标群发送 `/chatid`，将返回的群 ID 加入白名单。群内使用 `/price 商品名` 或 `/search 商品名` 查询；默认按最低价返回 10 个商品组。Token 只保存在服务器环境变量中，后台和数据库不会保存或回显。
+
 ## 目录
 
 - `apps/web`: Next.js 前台与运营后台
 - `apps/api`: NestJS API 与 Prisma 数据模型
 - `apps/worker`: BullMQ 采集 Worker
+- `apps/bot`: Telegram 机器人服务与 QQ 官方适配器骨架
 - `packages/contracts`: 共享 Zod 契约
 - `packages/crawler`: 安全 URL 验证、归一化与采集适配器
 

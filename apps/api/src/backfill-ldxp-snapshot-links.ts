@@ -21,6 +21,8 @@ type SnapshotItem = {
   image_url?: unknown;
   thumbnail?: unknown;
   cover?: unknown;
+  shop_logo?: unknown;
+  shopLogo?: unknown;
 };
 
 type Snapshot = { items?: unknown[]; updated_at?: unknown; published_at?: unknown };
@@ -36,6 +38,7 @@ type ValidItem = {
   link: string;
   observedAt: Date;
   thumbnailUrl: string | null;
+  shopLogoUrl: string | null;
 };
 
 function stringValue(value: unknown) { return typeof value === "string" ? value.trim() : ""; }
@@ -81,11 +84,13 @@ function parseSnapshotItem(value: unknown): ValidItem | null {
   } catch { return null; }
   if (!/^ldxp:[A-Za-z0-9_-]{1,100}$/.test(id) || !/^[A-Za-z0-9._-]{1,100}$/.test(token) || !name || !/^https:\/\/pay\.ldxp\.cn\/item\/[A-Za-z0-9_-]+\/?$/.test(link) || price === null || price < 0 || price > 1_000_000 || !observedAt) return null;
   const stock = numberValue(item.stock);
+  const shopRecord = isRecord(item.shop) ? item.shop : null;
   return {
     id, name, category, price, token, link, observedAt,
     stock: stock === null ? null : Math.max(0, Math.trunc(stock)),
     active: Number(item.status) !== 0,
     thumbnailUrl: safeImage(item.image, item.image_url, item.thumbnail, item.cover),
+    shopLogoUrl: safeImage(item.shop_logo, item.shopLogo, shopRecord?.logo, shopRecord?.logo_url, shopRecord?.logoUrl),
   };
 }
 
@@ -115,7 +120,7 @@ async function main() {
     if (!source) throw new Error("LDXP data source does not exist");
     const allCandidates = await prisma.shopCandidate.findMany({
       where: { dataSourceId: source.id },
-      select: { id: true, externalId: true, reviewStatus: true, approvedShopId: true, rawMetadata: true },
+      select: { id: true, externalId: true, reviewStatus: true, approvedShopId: true, logoUrl: true, rawMetadata: true },
       orderBy: { id: "asc" },
     });
     const matched = allCandidates.filter((candidate) => isRecord(candidate.rawMetadata)
@@ -177,13 +182,13 @@ async function main() {
               dataSourceId: source.id, externalId: item.id, shopCandidateId: candidate.id, externalProductId: item.id,
               productName: item.name, category: item.category, price: item.price, currency: "CNY", stock: item.stock,
               stockStatus: item.stock === 0 ? "out_of_stock" : "in_stock", offerUrl: item.link, observedAt: item.observedAt,
-              ingestionRunId: run.id, active: item.active, rawMetadata: { sourceSite: "ldxp", importedSource: "local-snapshot", imageUrl: item.thumbnailUrl },
+              ingestionRunId: run.id, active: item.active, rawMetadata: { sourceSite: "ldxp", importedSource: "local-snapshot", imageUrl: item.thumbnailUrl, shopLogoUrl: item.shopLogoUrl },
             },
             update: {
               shopCandidateId: candidate.id, externalProductId: item.id, productName: item.name, category: item.category,
               price: item.price, stock: item.stock, stockStatus: item.stock === 0 ? "out_of_stock" : "in_stock",
               offerUrl: item.link, observedAt: item.observedAt, ingestionRunId: run.id, active: item.active, missingCount: 0,
-              rawMetadata: { sourceSite: "ldxp", importedSource: "local-snapshot", imageUrl: item.thumbnailUrl },
+              rawMetadata: { sourceSite: "ldxp", importedSource: "local-snapshot", imageUrl: item.thumbnailUrl, shopLogoUrl: item.shopLogoUrl },
             },
           });
           if (candidate.approvedShopId && (candidate.reviewStatus === CandidateReviewStatus.APPROVED || candidate.reviewStatus === CandidateReviewStatus.MERGED)) {
@@ -218,9 +223,11 @@ async function main() {
         }
         const currentMetadata = isRecord(candidate.rawMetadata) ? candidate.rawMetadata : {};
         const categories = [...new Set(items.map((item) => item.category))];
+        const shopLogoUrl = items.find((item) => item.shopLogoUrl)?.shopLogoUrl || candidate.logoUrl || null;
         await tx.shopCandidate.update({
           where: { id: candidate.id },
           data: {
+            logoUrl: shopLogoUrl || undefined,
             sourceSyncedAt: snapshotObservedAt,
             rawMetadata: {
               ...currentMetadata,
@@ -232,10 +239,14 @@ async function main() {
               offlineSnapshotChecksum: checksum,
               offlineSnapshotBackfilledAt: new Date().toISOString(),
               offlineSnapshotPublishedAt: stringValue(snapshot.published_at) || stringValue(snapshot.updated_at) || null,
+              snapshotShopLogoUrl: shopLogoUrl,
             },
           },
         });
-        if (candidate.approvedShopId) await tx.shop.update({ where: { id: candidate.approvedShopId }, data: { lastSyncedAt: snapshotObservedAt } });
+        if (candidate.approvedShopId) {
+          const existingShop = await tx.shop.findUnique({ where: { id: candidate.approvedShopId }, select: { logoUrl: true } });
+          await tx.shop.update({ where: { id: candidate.approvedShopId }, data: { lastSyncedAt: snapshotObservedAt, ...(existingShop?.logoUrl || !shopLogoUrl ? {} : { logoUrl: shopLogoUrl }) } });
+        }
         return { products: items.length, promoted: candidate.approvedShopId ? items.length : 0 };
       }, { timeout: 120_000 });
       processedShops += 1;

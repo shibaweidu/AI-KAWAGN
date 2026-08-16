@@ -1,4 +1,81 @@
-import { isLdxp211bCandidate, isLdxpProductSyncPending, normalizeApprovedHomepageUrl, parse211bDiscoveryInput, parse211bShopDirectory, parse211bShopProducts, parseImportRows, parseLdxpProductBackfillInput, parseLdxpSchedule } from "./ingestion.service";
+import { managedListingInputSchema, searchAdInputSchema } from "@ai-card/contracts";
+import { IngestionService, isLdxp211bCandidate, isLdxpProductSyncDue, isLdxpProductSyncPending, normalize211bOrigin, normalizeApprovedHomepageUrl, parse211bDiscoveryInput, parse211bShopDirectory, parse211bShopProducts, parseImportRows, parseLdxpProductBackfillInput, parseLdxpSchedule, shouldDeactivateMissingLdxpOffer } from "./ingestion.service";
+
+describe("managed listing editor", () => {
+  const current = {
+    id: "listing-1", type: "GATEWAY", title: "原赞助商", description: "原说明", url: "https://old.example.com",
+    thumbnailUrl: null, thumbnailObjectKey: "managed-listings/original.webp", badge: null, active: true, position: 0,
+    createdAt: new Date("2026-08-14T00:00:00.000Z"), updatedAt: new Date("2026-08-14T00:00:00.000Z"),
+  };
+
+  it("accepts only credential-free HTTPS destinations", () => {
+    const base = { type: "gateway", title: "赞助商", description: "", thumbnailUrl: "", badge: "" };
+    expect(() => managedListingInputSchema.parse({ ...base, url: "http://example.com" })).toThrow();
+    expect(() => managedListingInputSchema.parse({ ...base, url: "https://user:pass@example.com" })).toThrow();
+    expect(managedListingInputSchema.parse({ ...base, url: "https://example.com" }).url).toBe("https://example.com");
+  });
+
+  it("preserves the uploaded image when text is edited without a replacement", async () => {
+    const update = jest.fn().mockImplementation(({ data }) => ({ ...current, ...data, title: "新赞助商", updatedAt: new Date("2026-08-14T01:00:00.000Z") }));
+    const prisma = { managedListing: { findUnique: jest.fn().mockResolvedValue(current), update } };
+    const service = new IngestionService(prisma as never, { put: jest.fn(), remove: jest.fn() } as never);
+
+    await service.updateManagedListing("listing-1", { type: "gateway", title: "新赞助商", description: "新说明", url: "https://new.example.com", thumbnailUrl: "", badge: "" });
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ thumbnailObjectKey: "managed-listings/original.webp", thumbnailUrl: null }) }));
+  });
+
+  it("stores a valid local image and replaces the previous image", async () => {
+    const update = jest.fn().mockImplementation(({ data }) => ({ ...current, ...data, updatedAt: new Date("2026-08-14T02:00:00.000Z") }));
+    const put = jest.fn().mockResolvedValue("stored");
+    const prisma = { managedListing: { findUnique: jest.fn().mockResolvedValue(current), update } };
+    const remove = jest.fn().mockResolvedValue(undefined);
+    const service = new IngestionService(prisma as never, { put, remove } as never);
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
+
+    await service.updateManagedListing("listing-1", { type: "gateway", title: "原赞助商", description: "", url: "https://new.example.com", thumbnailUrl: "", badge: "" }, { buffer: png, size: png.length, mimetype: "image/png" } as Express.Multer.File);
+
+    expect(put).toHaveBeenCalledWith(expect.stringMatching(/^managed-listings\/.+\.png$/), png, "image/png");
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ thumbnailObjectKey: expect.stringMatching(/^managed-listings\/.+\.png$/), thumbnailUrl: null }) }));
+    expect(remove).toHaveBeenCalledWith("managed-listings/original.webp");
+  });
+});
+
+describe("search advertisement editor", () => {
+  const segment = { text: "限时优惠", bold: true, italic: false, underline: false, color: "orange" as const, href: "https://example.com/deal" };
+
+  it("parses structured content from multipart fields and rejects insecure image URLs", () => {
+    expect(searchAdInputSchema.parse({ title: "推广", url: "https://example.com", global: "true", content: JSON.stringify([segment]) }).content).toEqual([segment]);
+    expect(() => searchAdInputSchema.parse({ title: "推广", url: "https://example.com", global: true, logoUrl: "http://example.com/logo.png" })).toThrow();
+  });
+
+  it("updates rich text and replaces an uploaded background without losing statistics", async () => {
+    const current = {
+      id: "ad-1", title: "旧广告", description: "旧说明", descriptionContent: null, url: "https://example.com",
+      imageUrl: null, backgroundObjectKey: "search-ads/background/old.webp", logoUrl: "https://example.com/logo.webp", logoObjectKey: null,
+      label: "广告", keywords: [], global: true, active: true, position: 0, startsAt: null, endsAt: null,
+      impressionCount: 12, clickCount: 3, createdAt: new Date("2026-08-16T00:00:00.000Z"), updatedAt: new Date("2026-08-16T00:00:00.000Z"),
+    };
+    const update = jest.fn().mockImplementation(({ data }) => ({ ...current, ...data, updatedAt: new Date("2026-08-16T01:00:00.000Z") }));
+    const remove = jest.fn().mockResolvedValue(undefined);
+    const prisma = { searchAd: { findUnique: jest.fn().mockResolvedValue(current), update } };
+    const objects = { put: jest.fn().mockResolvedValue(undefined), remove };
+    const service = new IngestionService(prisma as never, objects as never);
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]);
+
+    const result = await service.updateSearchAd("ad-1", {
+      title: "新广告", url: "https://example.com", global: "true", active: "true", label: "推广",
+      content: JSON.stringify([segment]), backgroundImageUrl: "", logoUrl: "https://example.com/logo.webp",
+    }, { backgroundImage: [{ buffer: png, size: png.length, mimetype: "image/png" } as Express.Multer.File] });
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      description: "限时优惠", descriptionContent: [segment], imageUrl: null,
+      backgroundObjectKey: expect.stringMatching(/^search-ads\/background\/.+\.png$/),
+    }) }));
+    expect(remove).toHaveBeenCalledWith("search-ads/background/old.webp");
+    expect(result).toMatchObject({ impressionCount: 12, clickCount: 3, backgroundImageUrl: expect.stringContaining("/api/v1/assets/search-ads/ad-1/background") });
+  });
+});
 
 describe("ingestion import preview", () => {
   it("returns explicit valid and invalid counts for the admin preview", () => {
@@ -56,20 +133,44 @@ describe("LDXP schedule", () => {
 
 describe("LDXP product backfill", () => {
   it("uses bounded batches", () => {
-    expect(parseLdxpProductBackfillInput({})).toEqual({ batchSize: 25 });
-    expect(parseLdxpProductBackfillInput({ batchSize: "50" })).toEqual({ batchSize: 50 });
+    expect(parseLdxpProductBackfillInput({})).toEqual({ batchSize: 25, refreshAll: false, priorityTokens: [] });
+    expect(parseLdxpProductBackfillInput({ batchSize: "50", refreshAll: true, priorityTokens: ["King"] })).toEqual({ batchSize: 50, refreshAll: true, priorityTokens: ["King"] });
     expect(() => parseLdxpProductBackfillInput({ batchSize: 101 })).toThrow("1-100");
+    expect(() => parseLdxpProductBackfillInput({ refreshAll: "true" })).toThrow("布尔值");
+    expect(() => parseLdxpProductBackfillInput({ priorityTokens: ["bad/token"] })).toThrow("合法店铺 Token");
   });
 
   it("only treats a completed product sync marker as hydrated", () => {
     expect(isLdxpProductSyncPending({ discoverySource: "211b.site" })).toBe(true);
     expect(isLdxpProductSyncPending({ productSyncedAt: "2026-08-10T00:00:00.000Z" })).toBe(false);
+    expect(isLdxpProductSyncPending({ productSyncStatus: "failed", productSyncedAt: "2026-08-10T00:00:00.000Z" })).toBe(true);
     expect(isLdxp211bCandidate({ discoverySource: "211b.site" })).toBe(true);
     expect(isLdxp211bCandidate({ importedSource: "ldxp-shop-directory" })).toBe(false);
+  });
+
+  it("refreshes completed shops once per full refresh run", () => {
+    const runStartedAt = new Date("2026-08-11T00:00:00.000Z");
+    expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-10T23:00:00.000Z" }, true, runStartedAt)).toBe(true);
+    expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-11T00:01:00.000Z" }, true, runStartedAt)).toBe(false);
+    expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-10T23:00:00.000Z" }, false, runStartedAt)).toBe(false);
+  });
+
+  it("only deactivates an offer after two successful snapshots miss it", () => {
+    expect(shouldDeactivateMissingLdxpOffer(0)).toBe(false);
+    expect(shouldDeactivateMissingLdxpOffer(1)).toBe(false);
+    expect(shouldDeactivateMissingLdxpOffer(2)).toBe(true);
+    expect(shouldDeactivateMissingLdxpOffer(3)).toBe(true);
   });
 });
 
 describe("211b directory discovery", () => {
+  it("uses the current fixed HTTPS mirror origin", () => {
+    expect(normalize211bOrigin()).toBe("https://2dou.org");
+    expect(normalize211bOrigin("https://mirror.example/")).toBe("https://mirror.example");
+    expect(() => normalize211bOrigin("http://mirror.example")).toThrow("HTTPS");
+    expect(() => normalize211bOrigin("https://mirror.example/shops")).toThrow("无路径");
+  });
+
   it("extracts public shop cards as LDXP candidates", () => {
     const html = `
       <section><div class="section-heading"><span>811 家</span></div>
@@ -92,7 +193,7 @@ describe("211b directory discovery", () => {
         {
           token: "G062JE24",
           name: "各类低价对接汇总",
-          mirrorUrl: "https://211b.site/shops/G062JE24",
+          mirrorUrl: "https://2dou.org/shops/G062JE24",
           originalShopUrl: "https://pay.ldxp.cn/shop/G062JE24",
           productCount: 1676,
           minPrice: 0,
@@ -101,7 +202,7 @@ describe("211b directory discovery", () => {
         {
           token: "xt123",
           name: "ai小头",
-          mirrorUrl: "https://211b.site/shops/xt123",
+          mirrorUrl: "https://2dou.org/shops/xt123",
           originalShopUrl: "https://pay.ldxp.cn/shop/xt123",
           productCount: 988,
           minPrice: 0.01,

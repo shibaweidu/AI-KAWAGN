@@ -5,6 +5,7 @@ import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { MobileNav } from "@/components/MobileNav";
 import { AiAssistant } from "@/components/AiAssistant";
+import { AnnouncementBar } from "@/components/AnnouncementBar";
 
 const fallbackSettings = { siteName: "AI卡网", seoTitle: "全网数字商品货源比价", seoDescription: "聚合已授权数字商店的公开商品与价格，快速比较同款货源。", seoKeywords: [] as string[], logoUrl: null as string | null };
 
@@ -28,4 +29,4 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 export const viewport: Viewport = { width: "device-width", initialScale: 1, themeColor: "#ffffff" };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) { return <html lang="zh-CN" data-scroll-behavior="smooth"><body><Header /><main id="main-content">{children}</main><Footer /><MobileNav /><AiAssistant /></body></html>; }
+export default function RootLayout({ children }: { children: React.ReactNode }) { return <html lang="zh-CN" data-scroll-behavior="smooth"><body><div className="site-chrome"><AnnouncementBar /><Header /></div><main id="main-content">{children}</main><Footer /><MobileNav /><AiAssistant /></body></html>; }

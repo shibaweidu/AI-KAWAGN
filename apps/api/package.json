@@ -17,6 +17,9 @@
     "import:ldxp-products": "tsx src/import-ldxp-products.ts",
     "backfill:ldxp-snapshot-links": "tsx src/backfill-ldxp-snapshot-links.ts",
     "backfill:ldxp-products": "tsx src/run-ldxp-product-backfill.ts",
+    "sync:ldxp-211b": "tsx src/sync-ldxp-211b.ts",
+    "sync:gateway-directory": "tsx src/sync-gateway-directory.ts",
+    "probe:gateway": "tsx src/run-gateway-probe.ts",
     "data:retain-ldxp-only": "tsx src/retain-ldxp-only.ts"
   },
   "dependencies": {

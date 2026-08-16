@@ -46,9 +46,14 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-change-me}
       S3_BUCKET: ${S3_BUCKET:-raw-snapshots}
       WORKER_TOKEN: ${WORKER_TOKEN:-development-worker-token-change-me}
+      BOT_INTERNAL_SECRET: ${BOT_INTERNAL_SECRET:-development-bot-internal-secret-change-me}
+      GATEWAY_PROBE_ENCRYPTION_KEY: ${GATEWAY_PROBE_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
       DATA_MODE: ${DATA_MODE:-database}
       JWT_SECRET: ${JWT_SECRET:-development-only-secret-change-before-production}
+      SUBMISSION_IP_HASH_SECRET: ${SUBMISSION_IP_HASH_SECRET:-development-submission-ip-hash-secret-change-before-production}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      SOURCE_211B_REQUEST_DELAY_MS: ${SOURCE_211B_REQUEST_DELAY_MS:-5000}
+      ZUIQUANAPI_FEED_URL: ${ZUIQUANAPI_FEED_URL:-}
     ports: ["4000:4000"]
     depends_on: [postgres, redis, meilisearch, minio]
   worker:
@@ -66,8 +71,30 @@ services:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me}
       API_ORIGIN: http://api:4000
       WORKER_TOKEN: ${WORKER_TOKEN:-development-worker-token-change-me}
+      GATEWAY_PROBE_ENCRYPTION_KEY: ${GATEWAY_PROBE_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      ENABLE_GATEWAY_PROBES: ${ENABLE_GATEWAY_PROBES:-false}
       ENABLE_SOURCE_SCHEDULERS: ${ENABLE_SOURCE_SCHEDULERS:-false}
       PAUSE_SOURCE_JOBS: ${PAUSE_SOURCE_JOBS:-true}
+      SOURCE_211B_REQUEST_DELAY_MS: ${SOURCE_211B_REQUEST_DELAY_MS:-5000}
+      SOURCE_211B_MAX_PAGES: ${SOURCE_211B_MAX_PAGES:-50}
+      SOURCE_211B_BATCH_SIZE: ${SOURCE_211B_BATCH_SIZE:-5}
+      ZUIQUANAPI_FEED_URL: ${ZUIQUANAPI_FEED_URL:-}
+    depends_on: [api, redis]
+  bot:
+    build:
+      context: .
+      dockerfile: apps/bot/Dockerfile
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      API_ORIGIN: http://api:4000
+      PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-http://localhost:3000}
+      BOT_INTERNAL_SECRET: ${BOT_INTERNAL_SECRET:-development-bot-internal-secret-change-me}
+      BOT_HASH_SECRET: ${BOT_HASH_SECRET:-development-bot-hash-secret-change-me}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_ENABLED: ${TELEGRAM_BOT_ENABLED:-false}
+      QQ_APP_ID: ${QQ_APP_ID:-}
+      QQ_CLIENT_SECRET: ${QQ_CLIENT_SECRET:-}
+      QQ_BOT_ENABLED: ${QQ_BOT_ENABLED:-false}
     depends_on: [api, redis]
   web:
     build:

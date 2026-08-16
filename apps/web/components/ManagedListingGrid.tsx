@@ -9,6 +9,9 @@ export type ManagedListingItem = {
   url: string;
   thumbnailUrl: string | null;
   badge: string | null;
+  modelTags?: string[];
+  pricingClaims?: string | null;
+  probe?: { configured: boolean; status: "online" | "partial" | "offline" | "unconfigured"; availableModels: number; totalModels: number; lastCheckedAt: string | null } | null;
 };
 
 export function ManagedListingGrid({ items, emptyTitle, emptyDescription }: { items: ManagedListingItem[]; emptyTitle: string; emptyDescription: string }) {

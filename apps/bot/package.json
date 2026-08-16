@@ -1,0 +1,27 @@
+{
+  "name": "@ai-card/bot",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "jest --runInBand",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-card/contracts": "workspace:*",
+    "grammy": "^1.38.2",
+    "ioredis": "^5.6.0",
+    "pino": "^9.6.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.14.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.3.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

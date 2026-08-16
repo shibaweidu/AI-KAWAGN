@@ -2,15 +2,29 @@ import { BadRequestException, Body, Controller, Get, HttpException, HttpStatus, 
 import type { Request, Response } from "express";
 import { ZodError } from "zod";
 import { MarketService } from "./market.service";
+import { GatewayDirectoryService } from "./gateway-directory.service";
+import { GatewayProbeService } from "./gateway-probe.service";
+import { SubmissionService } from "./submission.service";
 
 @Controller()
 export class MarketController {
-  constructor(private readonly market: MarketService) {}
+  constructor(private readonly market: MarketService, private readonly gatewayDirectory: GatewayDirectoryService, private readonly gatewayProbe: GatewayProbeService, private readonly submissions: SubmissionService) {}
   @Get("health") health() { return { status: "ok", service: "ai-card-api", time: new Date().toISOString() }; }
   @Get("stats") stats() { return this.market.stats(); }
   @Get("categories") categories() { return this.market.categories(); }
+  @Get("categories/browse") categoryBrowse(@Query() query: Record<string, unknown>) { return this.wrap(() => this.market.categoryBrowse(query)); }
   @Get("hot") hot() { return this.market.hot(); }
   @Get("gateways") gateways() { return this.market.listings("gateway"); }
+  @Get("gateway-directory") gatewayDirectoryList(@Query() query: Record<string, unknown>) { return this.wrap(() => this.gatewayDirectory.listPublic(query)); }
+  @Get("gateway-directory-grouped") gatewayDirectoryGrouped(@Query() query: Record<string, unknown>) { return this.wrap(() => this.gatewayDirectory.listGroupedPublic(query)); }
+  @Get("gateway-directory/featured") featuredGateways(@Query("take") take?: string) { return this.gatewayDirectory.featured(Number(take) || 8); }
+  @Get("gateway-directory/:slug/checks") gatewayDirectoryChecks(@Param("slug") slug: string) { return this.gatewayDirectory.monitorHistory(slug); }
+  @Get("gateway-directory/:slug/model-availability") gatewayModelAvailability(@Param("slug") slug: string) { return this.gatewayProbe.publicAvailability(slug); }
+  @Get("gateway-directory/:slug") gatewayDirectoryDetail(@Param("slug") slug: string) { return this.gatewayDirectory.detail(slug); }
+  @Get("listings/:id/probe") async managedListingProbe(@Param("id") id: string) {
+    const [listing, availability] = await Promise.all([this.market.managedGatewayListing(id), this.gatewayProbe.publicAvailabilityForListing(id)]);
+    return { listing, availability };
+  }
   @Get("projects") projects() { return this.market.listings("project"); }
   @Get("shops") shops(@Query() query: Record<string, unknown>) { return this.wrap(() => this.market.shops(query)); }
   @Get("shops/:slug") shop(@Param("slug") slug: string, @Query() query: Record<string, unknown>) { return this.wrap(() => this.market.shop(slug, query)); }
@@ -28,7 +42,7 @@ export class MarketController {
   }
   @Get("demands") demands() { return this.market.listDemands(); }
   @Get("search") search(@Query() query: Record<string, unknown>) { return this.wrap(() => this.market.search(query)); }
-  @Post("submissions") submit(@Body() body: unknown) { return this.wrap(() => this.market.submit(body)); }
+  @Post("submissions") submit(@Body() body: unknown, @Req() request: Request) { return this.wrap(() => this.submissions.submit(body, request.ip || request.socket.remoteAddress || "unknown")); }
   @Post("demands") demand(@Body() body: unknown) { return this.wrap(() => this.market.demand(body)); }
   @Post("feedback") feedback(@Body() body: unknown) { return this.wrap(() => this.market.addFeedback(body)); }
   @Post("follows/:shopId") follow(@Param("shopId") shopId: string) { return this.market.follow(shopId); }
@@ -42,7 +56,10 @@ export class MarketController {
   }
   @Get("go/shop/:id") async redirectShop(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.shopTarget(id)); }
   @Get("go/offer/:id") async redirectOffer(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.offerTarget(id)); }
+  @Get("go/listing/:id") async redirectListing(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.listingTarget(id)); }
   @Get("go/banner/:id") async redirectBanner(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.bannerTarget(id)); }
+  @Get("go/side-ad/:slot") async redirectSideAd(@Param("slot") slot: string, @Res() response: Response) { return response.redirect(302, await this.market.sideAdTarget(slot)); }
   @Get("go/search-ad/:id") async redirectSearchAd(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.searchAdTarget(id)); }
+  @Get("go/gateway/:id") async redirectGateway(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.gatewayDirectory.target(id)); }
   private async wrap<T>(action: () => T | Promise<T>): Promise<T> { try { return await action(); } catch (error) { if (error instanceof ZodError) throw new BadRequestException(error.flatten()); throw error; } }
 }

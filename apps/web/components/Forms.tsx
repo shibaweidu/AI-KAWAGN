@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle, Eye, EyeSlash, LockKey, PaperPlaneTilt, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
+import { ArrowsLeftRight, CheckCircle, Eye, EyeSlash, LockKey, PaperPlaneTilt, ShieldCheck, Storefront, WarningCircle } from "@phosphor-icons/react";
 import * as OTPAuth from "otpauth";
 
 function useApiForm() {
@@ -31,8 +31,32 @@ function ResultMessage({ message, error }: { message: string; error: string }) {
 
 export function SubmitShopForm() {
   const state = useApiForm();
-  function onSubmit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const data = new FormData(event.currentTarget); void state.submit("/api/v1/submissions", { url: data.get("url"), contactEmail: data.get("email"), authorizationConfirmed: data.get("authorized") === "on" }, () => "已收到申请，系统将检查链接并在 1 个工作日内完成审核。"); }
-  return <form className="form-card" onSubmit={onSubmit}><label>店铺 HTTPS 链接<input name="url" type="url" required pattern="https://.*" placeholder="https://your-shop.example.com" /></label><label>联系邮箱<input name="email" type="email" required placeholder="owner@example.com" /></label><label className="checkbox"><input name="authorized" type="checkbox" required /><span>我确认拥有该店铺或已获得数据同步授权</span></label><button className="button dark" type="submit" disabled={state.loading}><ShieldCheck />{state.loading ? "检测中..." : "检测并提交"}</button><ResultMessage message={state.message} error={state.error} /></form>;
+  const [kind, setKind] = useState<"shop" | "gateway">("shop");
+  const isGateway = kind === "gateway";
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    void state.submit("/api/v1/submissions", {
+      kind,
+      name: data.get("name"),
+      url: data.get("url"),
+      contactEmail: data.get("email"),
+      description: data.get("description"),
+      authorizationConfirmed: data.get("authorized") === "on",
+      website: data.get("website"),
+    }, (body) => body.id ? `已收到投稿，编号：${body.id}。运营将在 1 个工作日内审核。` : "已收到投稿，运营将在 1 个工作日内审核。");
+  }
+  return <form className="form-card submission-form" onSubmit={onSubmit}>
+    <div className="segmented submission-kind" aria-label="投稿类型"><button type="button" className={!isGateway ? "active" : ""} onClick={() => setKind("shop")}><Storefront />提交店铺</button><button type="button" className={isGateway ? "active" : ""} onClick={() => setKind("gateway")}><ArrowsLeftRight />提交中转站</button></div>
+    <label>{isGateway ? "中转站名称" : "店铺名称"}<input name="name" required maxLength={200} placeholder={isGateway ? "例如：示例 API" : "例如：示例数字商店"} /></label>
+    <label>{isGateway ? "中转站官网或服务介绍页" : "店铺 HTTPS 链接"}<input name="url" type="url" required pattern="https://.*" placeholder={isGateway ? "https://api.example.com" : "https://your-shop.example.com"} /></label>
+    <label>联系邮箱<input name="email" type="email" required placeholder="owner@example.com" /></label>
+    <label>补充说明（选填）<textarea name="description" maxLength={1000} rows={4} placeholder={isGateway ? "可说明服务特点、支持的模型或活动信息" : "可说明商品范围、授权方式或同步资料"} /></label>
+    <label className="submission-honeypot" aria-hidden="true">网站<input name="website" tabIndex={-1} autoComplete="off" /></label>
+    <label className="checkbox"><input name="authorized" type="checkbox" required /><span>我确认拥有该{isGateway ? "中转站" : "店铺"}或已获得公开收录授权</span></label>
+    <p className="submission-note"><ShieldCheck />无需登录；请勿提交 API Key、账号密码或其他敏感凭据。</p>
+    <button className="button dark" type="submit" disabled={state.loading}><ShieldCheck />{state.loading ? "提交中..." : "提交审核"}</button><ResultMessage message={state.message} error={state.error} />
+  </form>;
 }
 
 export function DemandForm() {

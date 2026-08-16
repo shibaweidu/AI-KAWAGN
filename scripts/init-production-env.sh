@@ -32,7 +32,11 @@ POSTGRES_PASSWORD="$(random_hex 24)"
 MEILI_MASTER_KEY="$(random_hex 24)"
 S3_SECRET_KEY="$(random_hex 24)"
 JWT_SECRET="$(random_hex 32)"
+SUBMISSION_IP_HASH_SECRET="$(random_hex 32)"
 WORKER_TOKEN="$(random_hex 32)"
+BOT_INTERNAL_SECRET="$(random_hex 32)"
+BOT_HASH_SECRET="$(random_hex 32)"
+GATEWAY_PROBE_ENCRYPTION_KEY="$(random_hex 32)"
 
 umask 077
 {
@@ -50,7 +54,14 @@ umask 077
   printf 'S3_ACCESS_KEY=aicard\nS3_SECRET_KEY=%s\n' "$S3_SECRET_KEY"
   printf 'S3_BUCKET=raw-snapshots\n'
   printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
+  printf 'SUBMISSION_IP_HASH_SECRET=%s\n' "$SUBMISSION_IP_HASH_SECRET"
   printf 'WORKER_TOKEN=%s\n\n' "$WORKER_TOKEN"
+  printf 'BOT_INTERNAL_SECRET=%s\n' "$BOT_INTERNAL_SECRET"
+  printf 'BOT_HASH_SECRET=%s\n' "$BOT_HASH_SECRET"
+  printf 'TELEGRAM_BOT_TOKEN=\nTELEGRAM_BOT_ENABLED=false\n'
+  printf 'QQ_APP_ID=\nQQ_CLIENT_SECRET=\nQQ_BOT_ENABLED=false\n\n'
+  printf 'GATEWAY_PROBE_ENCRYPTION_KEY=%s\n' "$GATEWAY_PROBE_ENCRYPTION_KEY"
+  printf 'ENABLE_GATEWAY_PROBES=false\n\n'
   printf 'ENABLE_SOURCE_SCHEDULERS=false\n'
   printf 'CRAWLER_USER_AGENT=AIKawangBot/0.1\n'
 } > "$ENV_FILE"

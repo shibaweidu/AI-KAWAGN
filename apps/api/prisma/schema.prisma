@@ -21,6 +21,11 @@ enum ShopStatus {
   REJECTED
 }
 
+enum SubmissionKind {
+  SHOP
+  GATEWAY
+}
+
 enum ReviewStatus {
   PENDING
   PUBLISHED
@@ -61,388 +66,521 @@ enum ManagedListingType {
   PROJECT
 }
 
+enum SideAdSlot {
+  LEFT
+  RIGHT
+}
+
+enum GatewayReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  DUPLICATE
+  SOURCE_REMOVED
+}
+
+enum GatewayProbeKind {
+  MODELS
+  INFERENCE
+}
+
+enum GatewayProbeModelStatus {
+  UNTESTED
+  AVAILABLE
+  DEGRADED
+  UNAVAILABLE
+  PROTOCOL_UNSUPPORTED
+}
+
+enum GatewayProbeErrorCategory {
+  TIMEOUT
+  RATE_LIMITED
+  AUTHENTICATION
+  QUOTA_EXHAUSTED
+  MODEL_UNAVAILABLE
+  UPSTREAM_ERROR
+  PROTOCOL_ERROR
+  NETWORK_ERROR
+}
+
+enum BotPlatform {
+  TELEGRAM
+  QQ
+}
+
+enum BotRuntimeStatus {
+  DISABLED
+  WAITING_CONFIG
+  STARTING
+  RUNNING
+  ERROR
+}
+
 model User {
-  id String @id @default(cuid())
-  email String @unique
-  passwordHash String
-  role Role @default(BUYER)
-  verifiedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  sessions Session[]
-  claims ShopClaim[]
-  reviews Review[]
-  follows Follow[]
-  demands Demand[]
+  id            String         @id @default(cuid())
+  email         String         @unique
+  passwordHash  String
+  role          Role           @default(BUYER)
+  verifiedAt    DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  sessions      Session[]
+  claims        ShopClaim[]
+  reviews       Review[]
+  follows       Follow[]
+  demands       Demand[]
   notifications Notification[]
 }
 
 model Session {
-  id String @id @default(cuid())
-  tokenHash String @unique
-  userId String
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
   expiresAt DateTime
   revokedAt DateTime?
-  createdAt DateTime @default(now())
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId, expiresAt])
 }
 
 model Category {
-  id String @id @default(cuid())
-  slug String @unique
-  name String
+  id       String             @id @default(cuid())
+  slug     String             @unique
+  name     String
   parentId String?
   products CanonicalProduct[]
 }
 
 model Shop {
-  id String @id @default(cuid())
-  slug String @unique
-  name String
-  description String @default("")
-  logoUrl String?
-  homepageUrl String
-  adapterKind String
-  status ShopStatus @default(PENDING)
-  trustScore Float @default(50)
-  verifiedAt DateTime?
-  publishedAt DateTime?
-  syncIntervalMinutes Int @default(80)
-  lastSyncedAt DateTime?
-  failureCount Int @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  claims ShopClaim[]
-  sourceProducts SourceProduct[]
-  offers Offer[]
-  reviews Review[]
-  follows Follow[]
-  syncRuns SyncRun[]
-  rankings RankingSnapshot[]
-  sourceMappings ShopSource[]
-  approvedCandidates ShopCandidate[]
+  id                  String            @id @default(cuid())
+  slug                String            @unique
+  name                String
+  description         String            @default("")
+  logoUrl             String?
+  homepageUrl         String
+  adapterKind         String
+  status              ShopStatus        @default(PENDING)
+  trustScore          Float             @default(50)
+  verifiedAt          DateTime?
+  publishedAt         DateTime?
+  syncIntervalMinutes Int               @default(80)
+  lastSyncedAt        DateTime?
+  failureCount        Int               @default(0)
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  claims              ShopClaim[]
+  sourceProducts      SourceProduct[]
+  offers              Offer[]
+  reviews             Review[]
+  follows             Follow[]
+  syncRuns            SyncRun[]
+  rankings            RankingSnapshot[]
+  sourceMappings      ShopSource[]
+  approvedCandidates  ShopCandidate[]
 }
 
 model DataSource {
-  id String @id @default(cuid())
-  key String @unique
-  name String
-  kind DataSourceKind
-  baseUrl String
-  attributionUrl String
-  robotsUrl String?
-  termsUrl String?
-  enabled Boolean @default(false)
+  id                  String           @id @default(cuid())
+  key                 String           @unique
+  name                String
+  kind                DataSourceKind
+  baseUrl             String
+  attributionUrl      String
+  robotsUrl           String?
+  termsUrl            String?
+  enabled             Boolean          @default(false)
   pollIntervalSeconds Int
-  etag String?
-  lastModified String?
-  lastSnapshotId String?
-  robotsReviewedAt DateTime?
-  lastCheckedAt DateTime?
-  lastSuccessAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  runs IngestionRun[]
-  candidates ShopCandidate[]
-  offerCandidates OfferCandidate[]
-  shopMappings ShopSource[]
-  sourceProducts SourceProduct[]
-  offers Offer[]
+  etag                String?
+  lastModified        String?
+  lastSnapshotId      String?
+  robotsReviewedAt    DateTime?
+  lastCheckedAt       DateTime?
+  lastSuccessAt       DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  runs                IngestionRun[]
+  candidates          ShopCandidate[]
+  offerCandidates     OfferCandidate[]
+  shopMappings        ShopSource[]
+  sourceProducts      SourceProduct[]
+  offers              Offer[]
 }
 
 model IngestionRun {
-  id String @id @default(cuid())
-  dataSourceId String
-  kind String
-  status SyncStatus @default(QUEUED)
-  snapshotId String?
-  checksum String?
-  rawSnapshotKey String?
-  counts Json?
-  errorCode String?
-  errorMessage String?
-  startedAt DateTime?
-  finishedAt DateTime?
-  createdAt DateTime @default(now())
-  dataSource DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+  id              String           @id @default(cuid())
+  dataSourceId    String
+  kind            String
+  status          SyncStatus       @default(QUEUED)
+  snapshotId      String?
+  checksum        String?
+  rawSnapshotKey  String?
+  counts          Json?
+  errorCode       String?
+  errorMessage    String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  createdAt       DateTime         @default(now())
+  dataSource      DataSource       @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
   offerCandidates OfferCandidate[]
-  changes ImportChange[]
+  changes         ImportChange[]
+
   @@index([dataSourceId, createdAt])
 }
 
 model ShopCandidate {
-  id String @id @default(cuid())
-  dataSourceId String
-  externalId String
-  name String
-  directoryUrl String
-  homepageUrl String?
-  logoUrl String?
-  sourceListedAt DateTime?
-  sourceSyncedAt DateTime?
-  firstSeenAt DateTime @default(now())
-  lastSeenAt DateTime @default(now())
-  missingCount Int @default(0)
-  reviewStatus CandidateReviewStatus @default(PENDING)
-  reviewNote String?
-  rawMetadata Json?
-  approvedShopId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  dataSource DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
-  approvedShop Shop? @relation(fields: [approvedShopId], references: [id], onDelete: SetNull)
+  id              String                @id @default(cuid())
+  dataSourceId    String
+  externalId      String
+  name            String
+  directoryUrl    String
+  homepageUrl     String?
+  logoUrl         String?
+  sourceListedAt  DateTime?
+  sourceSyncedAt  DateTime?
+  firstSeenAt     DateTime              @default(now())
+  lastSeenAt      DateTime              @default(now())
+  missingCount    Int                   @default(0)
+  reviewStatus    CandidateReviewStatus @default(PENDING)
+  reviewNote      String?
+  rawMetadata     Json?
+  approvedShopId  String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  dataSource      DataSource            @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+  approvedShop    Shop?                 @relation(fields: [approvedShopId], references: [id], onDelete: SetNull)
   offerCandidates OfferCandidate[]
+
   @@unique([dataSourceId, externalId])
   @@index([reviewStatus, firstSeenAt])
 }
 
 model OfferCandidate {
-  id String @id @default(cuid())
-  dataSourceId String
-  externalId String
-  shopCandidateId String
-  externalProductId String
-  productName String
-  specification String @default("")
-  category String @default("其他")
-  price Decimal @db.Decimal(12, 2)
-  currency String @default("CNY")
-  stock Int?
-  stockStatus String
-  offerUrl String
-  observedAt DateTime
-  active Boolean @default(true)
-  missingCount Int @default(0)
-  rawMetadata Json?
-  ingestionRunId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  dataSource DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
-  shopCandidate ShopCandidate @relation(fields: [shopCandidateId], references: [id], onDelete: Cascade)
-  ingestionRun IngestionRun? @relation(fields: [ingestionRunId], references: [id], onDelete: SetNull)
+  id                   String        @id @default(cuid())
+  dataSourceId         String
+  externalId           String
+  shopCandidateId      String
+  externalProductId    String
+  productName          String
+  specification        String        @default("")
+  category             String        @default("其他")
+  price                Decimal       @db.Decimal(12, 2)
+  currency             String        @default("CNY")
+  stock                Int?
+  stockStatus          String
+  offerUrl             String
+  sourceAttributionUrl String?
+  observedAt           DateTime
+  active               Boolean       @default(true)
+  missingCount         Int           @default(0)
+  rawMetadata          Json?
+  ingestionRunId       String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  dataSource           DataSource    @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+  shopCandidate        ShopCandidate @relation(fields: [shopCandidateId], references: [id], onDelete: Cascade)
+  ingestionRun         IngestionRun? @relation(fields: [ingestionRunId], references: [id], onDelete: SetNull)
+
   @@unique([dataSourceId, externalId])
   @@index([shopCandidateId, active, observedAt])
 }
 
 model ShopSource {
-  id String @id @default(cuid())
-  shopId String
-  dataSourceId String
-  externalId String
-  collectionMode CollectionMode
-  attributionLabel String
+  id                    String         @id @default(cuid())
+  shopId                String
+  dataSourceId          String
+  externalId            String
+  collectionMode        CollectionMode
+  attributionLabel      String
   authorizationEvidence String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  dataSource DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  shop                  Shop           @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  dataSource            DataSource     @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+
   @@unique([dataSourceId, externalId])
   @@unique([shopId, dataSourceId])
 }
 
 model ImportChange {
-  id BigInt @id @default(autoincrement())
+  id             BigInt       @id @default(autoincrement())
   ingestionRunId String
-  entityType String
-  entityId String
-  action String
-  before Json?
-  after Json?
-  rolledBackAt DateTime?
-  createdAt DateTime @default(now())
-  ingestionRun IngestionRun @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
+  entityType     String
+  entityId       String
+  action         String
+  before         Json?
+  after          Json?
+  rolledBackAt   DateTime?
+  createdAt      DateTime     @default(now())
+  ingestionRun   IngestionRun @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
+
   @@index([ingestionRunId, createdAt])
 }
 
 model ShopClaim {
-  id String @id @default(cuid())
-  shopId String
-  userId String
-  method String
-  challenge String @unique
+  id         String    @id @default(cuid())
+  shopId     String
+  userId     String
+  method     String
+  challenge  String    @unique
   verifiedAt DateTime?
-  createdAt DateTime @default(now())
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  shop       Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([shopId, userId])
 }
 
 model ShopSubmission {
-  id String @id @default(cuid())
-  url String
-  contactEmail String
+  id                     String         @id @default(cuid())
+  kind                   SubmissionKind @default(SHOP)
+  name                   String         @default("")
+  url                    String
+  normalizedUrl          String         @default("")
+  contactEmail           String
+  description            String         @default("")
   authorizationConfirmed Boolean
-  status ShopStatus @default(PENDING)
-  reviewNote String?
-  createdAt DateTime @default(now())
+  clientIpHash           String?
+  status                 ShopStatus     @default(PENDING)
+  reviewNote             String?
+  reviewedAt             DateTime?
+  publishedShopId        String?
+  publishedGatewayId     String?
+  deletedAt              DateTime?
+  createdAt              DateTime       @default(now())
+
+  @@unique([kind, normalizedUrl])
   @@index([status, createdAt])
+  @@index([kind, status, createdAt])
+  @@index([clientIpHash, createdAt])
+  @@index([deletedAt, createdAt])
 }
 
 model CanonicalProduct {
-  id String @id @default(cuid())
-  slug String @unique
-  title String
+  id              String          @id @default(cuid())
+  slug            String          @unique
+  title           String
   normalizedTitle String
-  summary String @default("")
-  thumbnailUrl String?
-  categoryId String
-  fingerprint String @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  category Category @relation(fields: [categoryId], references: [id])
-  sourceProducts SourceProduct[]
-  offers Offer[]
+  summary         String          @default("")
+  thumbnailUrl    String?
+  categoryId      String
+  fingerprint     String          @unique
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  category        Category        @relation(fields: [categoryId], references: [id])
+  sourceProducts  SourceProduct[]
+  offers          Offer[]
+
   @@index([categoryId, normalizedTitle])
 }
 
 model SourceProduct {
-  id String @id @default(cuid())
-  shopId String
-  sourceId String
-  dataSourceId String
+  id                 String            @id @default(cuid())
+  shopId             String
+  sourceId           String
+  dataSourceId       String
   canonicalProductId String?
-  title String
-  normalizedTitle String
-  description String @default("")
-  thumbnailUrl String?
-  categoryHint String?
-  externalUrl String
-  rawSnapshotKey String?
-  active Boolean @default(true)
-  confidence Float?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  dataSource DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Restrict)
-  canonicalProduct CanonicalProduct? @relation(fields: [canonicalProductId], references: [id])
-  offers Offer[]
+  title              String
+  normalizedTitle    String
+  description        String            @default("")
+  thumbnailUrl       String?
+  categoryHint       String?
+  externalUrl        String
+  rawSnapshotKey     String?
+  active             Boolean           @default(true)
+  confidence         Float?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  shop               Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  dataSource         DataSource        @relation(fields: [dataSourceId], references: [id], onDelete: Restrict)
+  canonicalProduct   CanonicalProduct? @relation(fields: [canonicalProductId], references: [id])
+  offers             Offer[]
+
   @@unique([shopId, dataSourceId, sourceId])
   @@index([canonicalProductId, active])
 }
 
 model Offer {
-  id String @id @default(cuid())
-  shopId String
-  sourceProductId String
-  canonicalProductId String
-  dataSourceId String
-  externalId String
-  collectionMode CollectionMode
-  price Decimal @db.Decimal(12, 2)
-  stock Int?
-  currency String @default("CNY")
-  active Boolean @default(true)
-  sourceUrl String
-  sourceObservedAt DateTime
-  syncedAt DateTime @default(now())
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  sourceProduct SourceProduct @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
-  canonicalProduct CanonicalProduct @relation(fields: [canonicalProductId], references: [id], onDelete: Cascade)
-  dataSource DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Restrict)
-  history PriceHistory[]
+  id                   String           @id @default(cuid())
+  shopId               String
+  sourceProductId      String
+  canonicalProductId   String
+  dataSourceId         String
+  externalId           String
+  collectionMode       CollectionMode
+  price                Decimal          @db.Decimal(12, 2)
+  stock                Int?
+  currency             String           @default("CNY")
+  active               Boolean          @default(true)
+  sourceUrl            String
+  sourceAttributionUrl String?
+  sourceObservedAt     DateTime
+  syncedAt             DateTime         @default(now())
+  shop                 Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  sourceProduct        SourceProduct    @relation(fields: [sourceProductId], references: [id], onDelete: Cascade)
+  canonicalProduct     CanonicalProduct @relation(fields: [canonicalProductId], references: [id], onDelete: Cascade)
+  dataSource           DataSource       @relation(fields: [dataSourceId], references: [id], onDelete: Restrict)
+  history              PriceHistory[]
+
   @@unique([shopId, dataSourceId, externalId])
   @@index([canonicalProductId, active, price])
 }
 
+model OutboundClick {
+  id              BigInt   @id @default(autoincrement())
+  targetType      String
+  targetId        String
+  destinationHost String
+  createdAt       DateTime @default(now())
+
+  @@index([targetType, targetId, createdAt])
+  @@index([createdAt])
+}
+
 model PriceHistory {
-  id BigInt @id @default(autoincrement())
-  offerId String
-  price Decimal @db.Decimal(12, 2)
-  stock Int?
+  id         BigInt   @id @default(autoincrement())
+  offerId    String
+  price      Decimal  @db.Decimal(12, 2)
+  stock      Int?
   capturedAt DateTime @default(now())
-  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  offer      Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
   @@index([offerId, capturedAt])
 }
 
 model SyncRun {
-  id String @id @default(cuid())
-  shopId String
-  status SyncStatus @default(QUEUED)
-  productCount Int @default(0)
-  snapshotKey String?
-  errorCode String?
+  id           String     @id @default(cuid())
+  shopId       String
+  status       SyncStatus @default(QUEUED)
+  productCount Int        @default(0)
+  snapshotKey  String?
+  errorCode    String?
   errorMessage String?
-  startedAt DateTime?
-  finishedAt DateTime?
-  createdAt DateTime @default(now())
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime   @default(now())
+  shop         Shop       @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
   @@index([shopId, createdAt])
 }
 
 model Review {
-  id String @id @default(cuid())
-  shopId String
-  userId String
-  rating Int
-  comment String
-  status ReviewStatus @default(PENDING)
-  createdAt DateTime @default(now())
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String       @id @default(cuid())
+  shopId    String
+  userId    String
+  rating    Int
+  comment   String
+  status    ReviewStatus @default(PENDING)
+  createdAt DateTime     @default(now())
+  shop      Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([shopId, status, createdAt])
 }
 
 model Follow {
-  id String @id @default(cuid())
-  shopId String
-  userId String
+  id        String   @id @default(cuid())
+  shopId    String
+  userId    String
   createdAt DateTime @default(now())
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([shopId, userId])
 }
 
 model Demand {
-  id String @id @default(cuid())
-  userId String?
-  title String
+  id          String   @id @default(cuid())
+  userId      String?
+  title       String
   description String
-  budget Decimal? @db.Decimal(12, 2)
-  status String @default("open")
-  createdAt DateTime @default(now())
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  budget      Decimal? @db.Decimal(12, 2)
+  status      String   @default("open")
+  createdAt   DateTime @default(now())
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 }
 
 model Feedback {
-  id String @id @default(cuid())
-  ticket String @unique
-  contact String?
-  message String
-  status String @default("received")
+  id        String   @id @default(cuid())
+  ticket    String   @unique
+  contact   String?
+  message   String
+  status    String   @default("received")
   createdAt DateTime @default(now())
 }
 
 model Notification {
-  id String @id @default(cuid())
-  userId String
-  type String
-  title String
-  body String
-  href String?
-  readAt DateTime?
-  createdAt DateTime @default(now())
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String    @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  href      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId, readAt, createdAt])
 }
 
+model BotIntegration {
+  platform        BotPlatform      @id
+  enabled         Boolean          @default(false)
+  configured      Boolean          @default(false)
+  runtimeStatus   BotRuntimeStatus @default(DISABLED)
+  botUsername     String?
+  lastHeartbeatAt DateTime?
+  lastError       String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model BotChatAllowlist {
+  id             String      @id @default(cuid())
+  platform       BotPlatform
+  externalChatId String
+  label          String
+  note           String      @default("")
+  active         Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@unique([platform, externalChatId])
+  @@index([platform, active])
+}
+
+model BotQueryMetric {
+  id          BigInt      @id @default(autoincrement())
+  platform    BotPlatform
+  keyword     String
+  resultCount Int
+  durationMs  Int
+  status      String
+  createdAt   DateTime    @default(now())
+
+  @@index([platform, createdAt])
+  @@index([createdAt])
+}
+
 model RankingSnapshot {
-  id String @id @default(cuid())
-  shopId String
-  score Float
-  position Int
+  id           String   @id @default(cuid())
+  shopId       String
+  score        Float
+  position     Int
   calculatedAt DateTime @default(now())
-  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shop         Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
   @@index([calculatedAt, position])
 }
 
 model OutboxEvent {
-  id String @id @default(cuid())
-  topic String
+  id          String    @id @default(cuid())
+  topic       String
   aggregateId String
-  payload Json
+  payload     Json
   processedAt DateTime?
-  createdAt DateTime @default(now())
+  createdAt   DateTime  @default(now())
+
   @@index([processedAt, createdAt])
 }
 
@@ -458,27 +596,185 @@ model HotSearchTerm {
 }
 
 model ManagedListing {
-  id           String             @id @default(cuid())
-  type         ManagedListingType
-  title        String
-  description  String             @default("")
-  url          String
-  thumbnailUrl String?
-  badge        String?
-  active       Boolean            @default(true)
-  position     Int                @default(0)
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+  id                String             @id @default(cuid())
+  type              ManagedListingType
+  title             String
+  description       String             @default("")
+  url               String
+  thumbnailUrl      String?
+  thumbnailObjectKey String?
+  badge             String?
+  modelTags         String[]         @default([])
+  pricingClaims     String?
+  active            Boolean          @default(true)
+  position          Int              @default(0)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  probeConfig       GatewayProbeConfig?
 
   @@index([type, active, position])
+}
+
+model GatewayDirectoryEntry {
+  id                String               @id @default(cuid())
+  sourceKey         String
+  sourceSiteId      String
+  slug              String               @unique
+  name              String
+  description       String               @default("")
+  sourceSection     String               @default("all")
+  sourcePosition    Int?
+  sourceRedirectUrl String
+  destinationUrl    String?
+  destinationHost   String?
+  providerType      String               @default("第三方")
+  logoUrl           String?
+  sponsored         Boolean              @default(false)
+  online            Boolean?
+  upVotes           Int                  @default(0)
+  downVotes         Int                  @default(0)
+  availability7d    Float?
+  averageResponseMs Int?
+  modelTags         String[]             @default([])
+  pricingClaims     String?
+  reviewStatus      GatewayReviewStatus  @default(PENDING)
+  active            Boolean              @default(false)
+  featured          Boolean              @default(false)
+  position          Int                  @default(0)
+  displayGroupId    String?
+  missingCount      Int                  @default(0)
+  firstSeenAt       DateTime             @default(now())
+  lastSeenAt        DateTime             @default(now())
+  sourceUpdatedAt   DateTime?
+  rawMetadata       Json?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  displayGroup      GatewayDisplayGroup? @relation(fields: [displayGroupId], references: [id], onDelete: SetNull)
+  probeConfig       GatewayProbeConfig?
+
+  @@unique([sourceKey, sourceSiteId])
+  @@index([reviewStatus, active, updatedAt])
+  @@index([sourceSection, active, position])
+  @@index([destinationHost])
+  @@index([featured, active, position])
+  @@index([displayGroupId, active, position])
+}
+
+model GatewayProbeConfig {
+  id                       String                     @id @default(cuid())
+  gatewayId                String?                    @unique
+  managedListingId         String?                    @unique
+  baseUrl                  String
+  apiKeyCiphertext         String?
+  apiKeyLastFour           String?
+  enabled                  Boolean                    @default(false)
+  inferencePaused          Boolean                    @default(false)
+  pauseReason              GatewayProbeErrorCategory?
+  modelListIntervalMinutes Int                        @default(15)
+  inferenceIntervalMinutes Int                        @default(60)
+  bucketIntervalMinutes    Int                        @default(60)
+  nextModelListAt          DateTime?
+  nextInferenceAt          DateTime?
+  modelListRequestedAt     DateTime?
+  inferenceRequestedAt     DateTime?
+  leaseToken               String?
+  leaseUntil               DateTime?
+  lastModelListAt          DateTime?
+  lastInferenceAt          DateTime?
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
+  gateway                  GatewayDirectoryEntry?     @relation(fields: [gatewayId], references: [id], onDelete: Cascade)
+  managedListing           ManagedListing?            @relation(fields: [managedListingId], references: [id], onDelete: Cascade)
+  models                   GatewayProbeModel[]
+  results                  GatewayProbeResult[]
+
+  @@index([enabled, nextModelListAt])
+  @@index([enabled, nextInferenceAt])
+  @@index([leaseUntil])
+}
+
+model GatewayProbeModel {
+  id                  String                     @id @default(cuid())
+  configId            String
+  modelId             String
+  displayName         String
+  enabled             Boolean                    @default(false)
+  status              GatewayProbeModelStatus    @default(UNTESTED)
+  consecutiveFailures Int                        @default(0)
+  lastCheckedAt       DateTime?
+  lastSuccessAt       DateTime?
+  lastResponseMs      Int?
+  lastErrorCategory   GatewayProbeErrorCategory?
+  discoveredAt        DateTime                   @default(now())
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+  config              GatewayProbeConfig         @relation(fields: [configId], references: [id], onDelete: Cascade)
+  results             GatewayProbeResult[]
+
+  @@unique([configId, modelId])
+  @@index([configId, enabled])
+}
+
+model GatewayProbeResult {
+  id            String                     @id @default(cuid())
+  configId      String
+  modelId       String?
+  kind          GatewayProbeKind
+  success       Boolean
+  errorCategory GatewayProbeErrorCategory?
+  httpStatus    Int?
+  dnsMs         Int?
+  connectMs     Int?
+  ttfbMs        Int?
+  totalMs       Int?
+  checkedAt     DateTime                   @default(now())
+  config        GatewayProbeConfig         @relation(fields: [configId], references: [id], onDelete: Cascade)
+  model         GatewayProbeModel?         @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@index([configId, kind, checkedAt])
+  @@index([modelId, checkedAt])
+  @@index([checkedAt])
+}
+
+model GatewayDisplayGroup {
+  id        String                  @id @default(cuid())
+  key       String                  @unique
+  name      String
+  position  Int                     @default(0)
+  active    Boolean                 @default(true)
+  createdAt DateTime                @default(now())
+  updatedAt DateTime                @updatedAt
+  entries   GatewayDirectoryEntry[]
+
+  @@index([active, position])
+}
+
+model GatewayDirectorySyncRun {
+  id           String     @id @default(cuid())
+  sourceKey    String
+  status       SyncStatus @default(RUNNING)
+  mode         String
+  completeFeed Boolean    @default(false)
+  counts       Json?
+  errorMessage String?
+  startedAt    DateTime   @default(now())
+  finishedAt   DateTime?
+  createdAt    DateTime   @default(now())
+
+  @@index([sourceKey, createdAt])
+  @@index([status, createdAt])
 }
 
 model SearchAd {
   id              String    @id @default(cuid())
   title           String
   description     String    @default("")
+  descriptionContent Json?
   url             String
   imageUrl        String?
+  backgroundObjectKey String?
+  logoUrl         String?
+  logoObjectKey   String?
   label           String    @default("广告")
   keywords        String[]  @default([])
   global          Boolean   @default(false)
@@ -496,16 +792,19 @@ model SearchAd {
 }
 
 model SiteSetting {
-  id             String   @id @default("primary")
-  siteName       String   @default("AI卡网")
-  slogan         String   @default("AICardHub")
-  description    String   @default("聚合授权店铺的公开报价，让数字商品检索与比价更清晰。")
-  seoTitle       String   @default("全网数字商品货源比价")
-  seoDescription String   @default("聚合已授权数字商店的公开商品与价格，快速比较同款货源。")
-  seoKeywords    String[] @default([])
-  logoObjectKey  String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                       String   @id @default("primary")
+  siteName                 String   @default("AI卡网")
+  slogan                   String   @default("AICardHub")
+  description              String   @default("聚合授权店铺的公开报价，让数字商品检索与比价更清晰。")
+  seoTitle                  String   @default("全网数字商品货源比价")
+  seoDescription           String   @default("聚合已授权数字商店的公开商品与价格，快速比较同款货源。")
+  seoKeywords              String[] @default([])
+  logoObjectKey            String?
+  gatewayNoticeTitle       String   @default("使用前请独立核验")
+  gatewayNoticeDescription String   @default("建议少额充值，并避免通过第三方服务传输敏感信息。")
+  gatewayNoticeEnabled     Boolean  @default(true)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 }
 
 model HomeBanner {
@@ -524,4 +823,35 @@ model HomeBanner {
   updatedAt        DateTime  @updatedAt
 
   @@index([active, startsAt, endsAt])
+}
+
+model SideAd {
+  id              String    @id @default(cuid())
+  slot            SideAdSlot @unique
+  title           String    @default("")
+  url             String    @default("https://example.com")
+  imageUrl        String?
+  imageObjectKey  String?
+  label           String    @default("广告")
+  active          Boolean   @default(false)
+  impressionCount Int       @default(0)
+  clickCount      Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([active, slot])
+}
+
+model SiteAnnouncement {
+  id          String    @id @default("primary")
+  label       String    @default("公告")
+  content     Json
+  enabled     Boolean   @default(false)
+  dismissible Boolean   @default(true)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([enabled, startsAt, endsAt])
 }

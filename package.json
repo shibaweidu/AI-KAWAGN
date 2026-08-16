@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "scripts": {
-    "dev": "pnpm --filter @ai-card/contracts build && pnpm --filter @ai-card/crawler build && pnpm --parallel --filter @ai-card/api --filter @ai-card/web --filter @ai-card/worker dev",
+    "dev": "pnpm --filter @ai-card/contracts build && pnpm --filter @ai-card/crawler build && pnpm --parallel --filter @ai-card/api --filter @ai-card/web --filter @ai-card/worker --filter @ai-card/bot dev",
     "dev:web": "pnpm --filter @ai-card/contracts build && pnpm --filter @ai-card/web dev",
     "dev:api": "pnpm --filter @ai-card/contracts build && pnpm --filter @ai-card/api dev",
     "build": "pnpm -r --if-present build",
@@ -11,6 +11,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "db:generate": "pnpm --filter @ai-card/api prisma:generate",
     "db:migrate": "pnpm --filter @ai-card/api prisma:migrate",
-    "sync:ldxp": "node ldxp-shop-directory/sync.mjs && pnpm --filter @ai-card/api import:ldxp-products"
+    "sync:ldxp": "pnpm --filter @ai-card/api sync:ldxp-211b",
+    "sync:gateways": "pnpm --filter @ai-card/api sync:gateway-directory"
   }
 }

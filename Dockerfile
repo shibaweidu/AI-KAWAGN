@@ -9,6 +9,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY apps/worker/package.json apps/worker/package.json
+COPY apps/bot/package.json apps/bot/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/crawler/package.json packages/crawler/package.json
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
@@ -21,6 +22,7 @@ COPY . .
 RUN pnpm db:generate && pnpm build
 RUN pnpm --filter @ai-card/api deploy --prod --legacy /prod/api \
     && pnpm --filter @ai-card/worker deploy --prod --legacy /prod/worker \
+    && pnpm --filter @ai-card/bot deploy --prod --legacy /prod/bot \
     && cd /prod/api \
     && ./node_modules/.bin/prisma generate --schema=prisma/schema.prisma \
     && api_client="$(find /prod/api/node_modules/.pnpm -type d -path '*/node_modules/@prisma/client' -print -quit)" \
@@ -59,3 +61,10 @@ COPY --from=build --chown=node:node /app/apps/web/public ./apps/web/public
 USER node
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]
+
+FROM node:22-alpine AS bot
+ENV NODE_ENV=production
+WORKDIR /app/apps/bot
+COPY --from=build --chown=node:node /prod/bot ./
+USER node
+CMD ["node", "dist/main.js"]

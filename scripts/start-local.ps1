@@ -90,6 +90,22 @@ function Wait-TcpPort([int]$Port, [string]$Label, [int]$TimeoutSeconds = 60) {
   throw "$Label did not become ready on port $Port within $TimeoutSeconds seconds"
 }
 
+function Test-ListeningPort([int]$Port) {
+  return $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Test-WorkspaceProcess([string]$Needle) {
+  return $null -ne (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Needle*" } |
+    Select-Object -First 1)
+}
+
+function Test-PrismaClientGenerated {
+  $clientRoot = Join-Path $repoRoot "node_modules\.pnpm"
+  if (-not (Test-Path -LiteralPath $clientRoot)) { return $false }
+  return $null -ne (Get-ChildItem -Path $clientRoot -Filter "query_engine-windows.dll.node" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
 try {
   Set-Location -LiteralPath $repoRoot
 
@@ -131,21 +147,33 @@ try {
     $adminPassword = "Local-$(New-HexSecret 12)"
     Set-DotEnvValue "ADMIN_PASSWORD" $adminPassword
   }
-  foreach ($secretName in @("JWT_SECRET", "WORKER_TOKEN")) {
+  foreach ($secretName in @("JWT_SECRET", "SUBMISSION_IP_HASH_SECRET", "WORKER_TOKEN", "BOT_INTERNAL_SECRET", "BOT_HASH_SECRET", "GATEWAY_PROBE_ENCRYPTION_KEY")) {
     $secret = Get-DotEnvValue $secretName
     if ($secret.Length -lt 32 -or $secret.StartsWith("replace-")) {
       Set-DotEnvValue $secretName (New-HexSecret 32)
     }
   }
-  Set-DotEnvValue "ENABLE_SOURCE_SCHEDULERS" "false"
-  Set-DotEnvValue "PAUSE_SOURCE_JOBS" "true"
+  if ([string]::IsNullOrWhiteSpace((Get-DotEnvValue "ENABLE_SOURCE_SCHEDULERS"))) {
+    Set-DotEnvValue "ENABLE_SOURCE_SCHEDULERS" "false"
+  }
+  if ([string]::IsNullOrWhiteSpace((Get-DotEnvValue "ENABLE_GATEWAY_PROBES"))) {
+    Set-DotEnvValue "ENABLE_GATEWAY_PROBES" "true"
+  }
+  if ([string]::IsNullOrWhiteSpace((Get-DotEnvValue "PAUSE_SOURCE_JOBS"))) {
+    Set-DotEnvValue "PAUSE_SOURCE_JOBS" "true"
+  }
   if ([string]::IsNullOrWhiteSpace((Get-DotEnvValue "SOURCE_211B_REQUEST_DELAY_MS"))) {
     Set-DotEnvValue "SOURCE_211B_REQUEST_DELAY_MS" "3000"
   }
   Import-DotEnv
-  $env:ENABLE_SOURCE_SCHEDULERS = "false"
-  $env:PAUSE_SOURCE_JOBS = "true"
-  Write-Host "  Source collection is paused for this local session" -ForegroundColor Yellow
+  $apiAlreadyRunning = Test-ListeningPort 4000
+  $webAlreadyRunning = Test-ListeningPort 3000
+
+  if ($env:ENABLE_SOURCE_SCHEDULERS -eq "true" -and $env:PAUSE_SOURCE_JOBS -ne "true") {
+    Write-Host "  Authorized source collection is enabled for this local session" -ForegroundColor Green
+  } else {
+    Write-Host "  Source collection is paused for this local session" -ForegroundColor Yellow
+  }
 
   Write-Step "Starting PostgreSQL, Redis, Meilisearch and MinIO"
   Invoke-Checked $docker.Source @("compose", "up", "-d", "postgres", "redis", "meilisearch", "minio")
@@ -160,7 +188,11 @@ try {
   }
 
   Write-Step "Generating database client and applying migrations"
-  Invoke-Pnpm @("db:generate")
+  if ($apiAlreadyRunning -and (Test-PrismaClientGenerated)) {
+    Write-Host "  API is already running; reusing its generated Prisma client." -ForegroundColor Yellow
+  } else {
+    Invoke-Pnpm @("db:generate")
+  }
   Invoke-Pnpm @("--filter", "@ai-card/api", "prisma:deploy")
 
   Write-Step "Creating or updating the local administrator"
@@ -176,6 +208,21 @@ try {
 
   if ($SetupOnly) {
     Write-Host "`nSetup completed. Application processes were not started." -ForegroundColor Green
+    exit 0
+  }
+
+  if ($apiAlreadyRunning -and $webAlreadyRunning) {
+    if (-not (Test-WorkspaceProcess "apps\worker") -and -not (Test-WorkspaceProcess "worker\src\main.ts")) {
+      Write-Step "Starting the missing Worker process"
+      $workerOut = Join-Path $env:TEMP "ai-card-worker.out.log"
+      $workerErr = Join-Path $env:TEMP "ai-card-worker.err.log"
+      Start-Process -FilePath $script:PnpmCommand -ArgumentList ($script:PnpmPrefix + @("--filter", "@ai-card/worker", "dev")) -WorkingDirectory $repoRoot -RedirectStandardOutput $workerOut -RedirectStandardError $workerErr -WindowStyle Hidden | Out-Null
+      Start-Sleep -Seconds 2
+    }
+    Write-Host "  Website, API and Worker are already running. No duplicate processes were started." -ForegroundColor Green
+    Write-Host "  Website:  http://localhost:3000"
+    Write-Host "  Admin:    http://localhost:3000/admin"
+    if (-not $NoBrowser) { Start-Process "http://localhost:3000" }
     exit 0
   }
 
@@ -195,10 +242,22 @@ try {
     }
   }
 
-  Write-Step "Starting Web, API and Worker"
+  Write-Step "Starting Web, API, Worker and Bot service"
   Write-Host "Press Ctrl+C to stop application processes. Docker data services remain available for the next start.`n" -ForegroundColor DarkGray
   try {
-    Invoke-Pnpm @("dev")
+    if ($apiAlreadyRunning) {
+      Write-Host "  Reusing the API already listening on port 4000." -ForegroundColor Yellow
+      Invoke-Pnpm @("--filter", "@ai-card/contracts", "build")
+      Invoke-Pnpm @("--filter", "@ai-card/crawler", "build")
+      Invoke-Pnpm @("--parallel", "--filter", "@ai-card/web", "--filter", "@ai-card/worker", "--filter", "@ai-card/bot", "dev")
+    } elseif ($webAlreadyRunning) {
+      Write-Host "  Reusing the website already listening on port 3000." -ForegroundColor Yellow
+      Invoke-Pnpm @("--filter", "@ai-card/contracts", "build")
+      Invoke-Pnpm @("--filter", "@ai-card/crawler", "build")
+      Invoke-Pnpm @("--parallel", "--filter", "@ai-card/api", "--filter", "@ai-card/worker", "--filter", "@ai-card/bot", "dev")
+    } else {
+      Invoke-Pnpm @("dev")
+    }
   } finally {
     if ($browserJob) {
       Stop-Job -Job $browserJob -ErrorAction SilentlyContinue

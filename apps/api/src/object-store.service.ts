@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { CreateBucketCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { CreateBucketCommand, DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 @Injectable()
 export class ObjectStoreService {
@@ -35,6 +35,10 @@ export class ObjectStoreService {
       contentType: response.ContentType || "application/octet-stream",
       etag: response.ETag,
     };
+  }
+
+  async remove(key: string) {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
   private ensureBucket() {

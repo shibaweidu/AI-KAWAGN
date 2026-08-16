@@ -12,6 +12,12 @@ export const defaultSiteSettings: SiteSettings = {
   seoKeywords: [],
   logoUrl: null,
   updatedAt: new Date(0).toISOString(),
+  gatewayNotice: {
+    title: "使用前请独立核验",
+    description: "建议少额充值，并避免通过第三方服务传输敏感信息。",
+    enabled: true,
+  },
+  announcement: null,
 };
 
 export async function getSiteSettings(signal?: AbortSignal) {

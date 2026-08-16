@@ -18,11 +18,13 @@ import {
   Storefront,
   Tag,
   WarningCircle,
+  X,
 } from "@phosphor-icons/react";
-import type { HomeResponse, OfferListItem, OfferSort, ProductOfferGroup, SearchAd, SearchAdPage, StockStatus } from "@ai-card/contracts";
+import type { HomeResponse, OfferListItem, OfferSort, ProductOfferGroup, SearchAd, SearchAdPage, SideAdSlot, StockStatus } from "@ai-card/contracts";
 import { getHome, getOffers, getSuggestions } from "@/lib/home-api";
 import { OfferFeedbackDialog } from "./OfferFeedbackDialog";
 import { MediaThumbnail } from "./MediaThumbnail";
+import { SearchAdCard } from "./SearchAdCard";
 
 const stockLabels: Record<StockStatus, string> = { in_stock: "有货", low_stock: "低库存", out_of_stock: "缺货" };
 const sortLabels: Record<OfferSort, string> = { price_asc: "价格从低到高", newest: "最近更新", stock_desc: "库存优先" };
@@ -60,6 +62,16 @@ export function HomeMarketplace() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [expandedProductId, setExpandedProductId] = useState<string | null>(null);
+  const [dismissedSideAds, setDismissedSideAds] = useState<Record<SideAdSlot, boolean>>({ left: false, right: false });
+
+  useEffect(() => {
+    try {
+      setDismissedSideAds({
+        left: window.sessionStorage.getItem("ai-card-side-ad-dismissed:left") === "1",
+        right: window.sessionStorage.getItem("ai-card-side-ad-dismissed:right") === "1",
+      });
+    } catch { /* Storage may be disabled by the browser. */ }
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -127,13 +139,22 @@ export function HomeMarketplace() {
     navigate({ q: value }, true);
   }
 
+  function dismissSideAd(slot: SideAdSlot) {
+    setDismissedSideAds((current) => ({ ...current, [slot]: true }));
+    try { window.sessionStorage.setItem(`ai-card-side-ad-dismissed:${slot}`, "1"); } catch { /* Ignore unavailable session storage. */ }
+  }
+
   return <div className="home-marketplace">
     {!home?.banner && <h1 className="visually-hidden">数字商品报价检索</h1>}
-    <div className={`home-intro shell ${home?.banner ? "" : "without-banner"}`}>
-    {home?.banner && <section className="home-banner-shell" aria-label="运营广告">
+    <div className="home-side-layout">
+      <SideAdRail slot="left" ad={home?.sideAds.find((item) => item.slot === "left") || null} dismissed={dismissedSideAds.left} onDismiss={dismissSideAd} />
+      <div className="home-main-column">
+      <div className={`home-intro shell ${home?.banner ? "" : "without-banner"}`}>
+      {home?.banner && <section className="home-banner-shell" aria-label="运营广告">
       <article className="home-banner">
-        <picture><source media="(max-width: 900px)" srcSet={home.banner.imageMobile}/><img src={home.banner.imageDesktop} alt="" /></picture>
-        <div className="home-banner-copy"><span className="ad-label">{home.banner.label}</span><h1>{home.banner.title}</h1><p>{home.banner.summary}</p><a className="button dark" href={`/api/v1/go/banner/${home.banner.id}`} target="_blank" rel="noreferrer sponsored">{home.banner.buttonLabel}<ArrowRight /></a></div>
+        {home.banner.targetUrl ? <a className="home-banner-image-link" href={`/api/v1/go/banner/${home.banner.id}`} target="_blank" rel="noreferrer sponsored" aria-label={`${home.banner.label}：${home.banner.title}`}>
+          <picture><source media="(max-width: 900px)" srcSet={home.banner.imageMobile}/><img src={home.banner.imageDesktop} alt={home.banner.title} /></picture>
+        </a> : <picture><source media="(max-width: 900px)" srcSet={home.banner.imageMobile}/><img className="home-banner-standalone-image" src={home.banner.imageDesktop} alt={home.banner.title} /></picture>}
       </article>
     </section>}
 
@@ -163,29 +184,35 @@ export function HomeMarketplace() {
         <div className="last-sync"><dt><Clock aria-hidden="true" /><span>最近同步</span></dt><dd><strong>{home?.stats.lastSyncedAt ? relativeTime(home.stats.lastSyncedAt) : "暂无同步"}</strong><small>{home?.stats.lastSyncedAt ? exactTime(home.stats.lastSyncedAt) : home ? "等待首条发布数据" : "正在读取"}</small></dd></div>
       </dl>}
     </aside>
-    </div>
+      </div>
 
-    <section className="offer-results shell" aria-labelledby="offer-results-title">
+      <section className="offer-results shell" aria-labelledby="offer-results-title">
       <div className="home-section-heading"><div className="home-heading-inline"><span className="kicker"><Tag />实时报价</span><h2 id="offer-results-title">报价结果</h2></div><span className="result-summary">默认按最低价展示 20 款商品</span></div>
       {!loading && !offersError && offers?.ad && <SearchAdCard ad={offers.ad} />}
       {loading ? <OfferSkeleton /> : offersError ? <div className="results-state"><WarningCircle /><h3>报价加载失败</h3><p>请检查接口服务后重试。</p><button className="button dark" onClick={() => router.refresh()}>重新加载</button></div> : offers && offers.items.length > 0 ? <>
         <GroupedOfferResults groups={offers.items} sort={sort} expandedProductId={expandedProductId} onToggle={(productId) => setExpandedProductId((current) => current === productId ? null : productId)} onSort={(nextSort) => navigate({ sort: nextSort }, true)} />
         <Pagination page={offers.page} totalPages={offers.totalPages} onPage={(page) => navigate({ page }, false)} />
       </> : <div className="results-state"><MagnifyingGlass /><h3>暂无逐条商品报价</h3><p>当前已完成店铺目录收录，商品明细和同款报价将在授权同步后展示。</p><div className="empty-keywords">{home?.hotSearches.slice(0, 4).map((item) => <button key={item} type="button" onClick={() => chooseSuggestion(item)}>{item}</button>)}</div>{hasFilters && <button className="button dark" onClick={clearFilters}>清除筛选</button>}</div>}
-    </section>
+      </section>
+      </div>
+      <SideAdRail slot="right" ad={home?.sideAds.find((item) => item.slot === "right") || null} dismissed={dismissedSideAds.right} onDismiss={dismissSideAd} />
+    </div>
   </div>;
 }
 
-function SearchAdCard({ ad }: { ad: SearchAd }) {
-  return <article className="search-ad-card" aria-label={`推广：${ad.title}`}>
-    {ad.imageUrl ? <img src={ad.imageUrl} alt="" loading="lazy" /> : <div className="search-ad-placeholder"><Tag /></div>}
-    <div className="search-ad-copy">
-      <span className="ad-label">{ad.label}</span>
-      <h3>{ad.title}</h3>
-      <p>{ad.description || "由平台运营置顶展示，访问前请自行核对服务内容与交易条款。"}</p>
+function SideAdRail({ slot, ad, dismissed, onDismiss }: { slot: SideAdSlot; ad: HomeResponse["sideAds"][number] | null; dismissed: boolean; onDismiss: (slot: SideAdSlot) => void }) {
+  if (!ad || dismissed) return <aside className={`home-side-ad home-side-ad-${slot}`} aria-hidden="true" />;
+  const label = slot === "left" ? "左侧广告" : "右侧广告";
+  return <aside className={`home-side-ad home-side-ad-${slot}`} aria-label={`${ad.label}：${ad.title}`}>
+    <div className="home-side-ad-sticky">
+      <button className="home-side-ad-close" type="button" aria-label={`关闭${label}`} title={`关闭${label}`} onClick={() => onDismiss(slot)}><X /></button>
+      <a href={`/api/v1/go/side-ad/${slot}`} target="_blank" rel="noreferrer sponsored" aria-label={`${ad.label}：${ad.title}`}>
+        <span className="home-side-ad-label">{ad.label}</span>
+        <img src={ad.imageUrl} alt={ad.title} loading="lazy" />
+        <strong>{ad.title}</strong>
+      </a>
     </div>
-    <a className="button dark compact" href={`/api/v1/go/search-ad/${ad.id}`} target="_blank" rel="noreferrer sponsored">查看推广 <ArrowSquareOut /></a>
-  </article>;
+  </aside>;
 }
 
 function GroupedOfferResults({ groups, sort, expandedProductId, onToggle, onSort }: {
