@@ -71,6 +71,43 @@ enum SideAdSlot {
   RIGHT
 }
 
+enum SponsorAdStatus {
+  DRAFT
+  PENDING_PAYMENT
+  PAID_PENDING_REVIEW
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum SponsorAdKind {
+  GATEWAY
+  SHOP
+}
+
+enum SponsorPlacementSlotKind {
+  GATEWAY
+  SHOP
+}
+
+enum SponsorPlacementOrderStatus {
+  PENDING_PAYMENT
+  PAYMENT_PROCESSING
+  PAID_PENDING_REVIEW
+  APPROVED
+  REJECTED
+  REFUND_PENDING
+  REFUNDED
+  CANCELLED
+}
+
+enum SponsorPlacementCampaignStatus {
+  SCHEDULED
+  RUNNING
+  EXPIRED
+  CANCELLED
+}
+
 enum GatewayReviewStatus {
   PENDING
   APPROVED
@@ -121,15 +158,21 @@ model User {
   email         String         @unique
   passwordHash  String
   role          Role           @default(BUYER)
-  verifiedAt    DateTime?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  sessions      Session[]
-  claims        ShopClaim[]
-  reviews       Review[]
-  follows       Follow[]
-  demands       Demand[]
-  notifications Notification[]
+  verifiedAt         DateTime?
+  disabledAt         DateTime?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  sessions           Session[]
+  claims             ShopClaim[]
+  reviews            Review[]
+  follows            Follow[]
+  demands            Demand[]
+  notifications      Notification[]
+  sponsorAds         SponsorAd[]
+  placementOrders    SponsorPlacementOrder[]
+  managedListings    ManagedListing[]
+
+  @@index([disabledAt, role, createdAt])
 }
 
 model Session {
@@ -178,6 +221,9 @@ model Shop {
   rankings            RankingSnapshot[]
   sourceMappings      ShopSource[]
   approvedCandidates  ShopCandidate[]
+
+  @@index([status, publishedAt, id])
+  @@index([lastSyncedAt, status])
 }
 
 model DataSource {
@@ -424,6 +470,8 @@ model Offer {
 
   @@unique([shopId, dataSourceId, externalId])
   @@index([canonicalProductId, active, price])
+  @@index([active, syncedAt])
+  @@index([shopId, canonicalProductId, active, sourceObservedAt])
 }
 
 model OutboundClick {
@@ -596,61 +644,193 @@ model HotSearchTerm {
 }
 
 model ManagedListing {
-  id                String             @id @default(cuid())
-  type              ManagedListingType
-  title             String
-  description       String             @default("")
-  url               String
-  thumbnailUrl      String?
+  id                 String              @id @default(cuid())
+  type               ManagedListingType
+  title              String
+  description        String              @default("")
+  url                String
+  thumbnailUrl       String?
   thumbnailObjectKey String?
-  badge             String?
-  modelTags         String[]         @default([])
-  pricingClaims     String?
-  active            Boolean          @default(true)
-  position          Int              @default(0)
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
-  probeConfig       GatewayProbeConfig?
+  badge              String?
+  modelTags          String[]            @default([])
+  pricingClaims      String?
+  gatewayPlacement   Boolean             @default(false)
+  homeSideSlot       SideAdSlot?
+  homeBottomPlacement Boolean            @default(false)
+  active             Boolean             @default(true)
+  position           Int                 @default(0)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  ownerUserId        String?
+  ownerUser          User?               @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+  probeConfig        GatewayProbeConfig?
+  sponsorAd          SponsorAd?
+  campaigns          SponsorPlacementCampaign[]
 
-  @@index([type, active, position])
+  @@index([type, active, gatewayPlacement, position])
+  @@index([type, active, homeBottomPlacement, position])
+  @@index([type, active, homeSideSlot])
+  @@index([ownerUserId, active])
+}
+
+model SponsorAd {
+  id                 String         @id @default(cuid())
+  userId             String
+  kind               SponsorAdKind  @default(GATEWAY)
+  title              String
+  description        String         @default("")
+  url                String
+  badge              String?
+  modelTags          String[]       @default([])
+  pricingClaims      String?
+  imageUrl           String?
+  imageObjectKey     String?
+  status             SponsorAdStatus @default(DRAFT)
+  rejectionReason    String?
+  reviewedById       String?
+  reviewedAt         DateTime?
+  managedListingId   String?        @unique
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  user               User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  managedListing     ManagedListing? @relation(fields: [managedListingId], references: [id], onDelete: SetNull)
+  orders             SponsorPlacementOrder[]
+
+  @@index([userId, status, createdAt])
+  @@index([status, updatedAt])
+}
+
+model SponsorPlacementSlotConfig {
+  id             String   @id @default(cuid())
+  key            String   @unique
+  kind           SponsorPlacementSlotKind @default(GATEWAY)
+  name           String
+  description    String   @default("")
+  dailyPrice     Decimal  @db.Decimal(12, 2)
+  minDays        Int      @default(1)
+  maxDays        Int      @default(30)
+  capacity       Int      @default(1)
+  enabled        Boolean  @default(true)
+  position       Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  orderItems     SponsorPlacementOrderItem[]
+
+  @@index([enabled, position])
+}
+
+model SponsorPlacementOrder {
+  id              String               @id @default(cuid())
+  orderNo         String               @unique
+  userId          String
+  sponsorAdId     String
+  status          SponsorPlacementOrderStatus @default(PENDING_PAYMENT)
+  totalAmount     Decimal              @db.Decimal(12, 2)
+  paymentChannel  String?
+  transactionId   String?
+  paymentNotifiedAt DateTime?
+  paidAt          DateTime?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  reviewNote      String?
+  expiresAt       DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sponsorAd       SponsorAd            @relation(fields: [sponsorAdId], references: [id], onDelete: Cascade)
+  items           SponsorPlacementOrderItem[]
+  campaigns       SponsorPlacementCampaign[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([status, expiresAt])
+}
+
+model PaymentProviderConfig {
+  id                  String   @id
+  apiUrl              String?
+  pid                 String?
+  keyCiphertext       String?
+  keyLastFour         String?
+  type                String   @default("alipay")
+  orderTimeoutMinutes Int      @default(30)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model SponsorPlacementOrderItem {
+  id             String   @id @default(cuid())
+  orderId        String
+  slotConfigId   String
+  slotKey        String
+  dailyPrice     Decimal  @db.Decimal(12, 2)
+  days           Int
+  subtotal       Decimal  @db.Decimal(12, 2)
+  startsAt       DateTime?
+  endsAt         DateTime?
+  order          SponsorPlacementOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  slotConfig     SponsorPlacementSlotConfig @relation(fields: [slotConfigId], references: [id], onDelete: Restrict)
+  campaign       SponsorPlacementCampaign?
+
+  @@unique([orderId, slotKey])
+  @@index([slotKey, startsAt, endsAt])
+}
+
+model SponsorPlacementCampaign {
+  id             String                  @id @default(cuid())
+  orderId        String
+  orderItemId    String                  @unique
+  managedListingId String?
+  slotKey        String
+  startsAt       DateTime
+  endsAt         DateTime
+  status         SponsorPlacementCampaignStatus @default(SCHEDULED)
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  order          SponsorPlacementOrder          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItem      SponsorPlacementOrderItem      @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  managedListing ManagedListing?         @relation(fields: [managedListingId], references: [id], onDelete: Cascade)
+
+  @@index([slotKey, status, startsAt, endsAt])
+  @@index([endsAt, status])
 }
 
 model GatewayDirectoryEntry {
-  id                String               @id @default(cuid())
-  sourceKey         String
-  sourceSiteId      String
-  slug              String               @unique
-  name              String
-  description       String               @default("")
-  sourceSection     String               @default("all")
-  sourcePosition    Int?
-  sourceRedirectUrl String
-  destinationUrl    String?
-  destinationHost   String?
-  providerType      String               @default("第三方")
-  logoUrl           String?
-  sponsored         Boolean              @default(false)
-  online            Boolean?
-  upVotes           Int                  @default(0)
-  downVotes         Int                  @default(0)
-  availability7d    Float?
-  averageResponseMs Int?
-  modelTags         String[]             @default([])
-  pricingClaims     String?
-  reviewStatus      GatewayReviewStatus  @default(PENDING)
-  active            Boolean              @default(false)
-  featured          Boolean              @default(false)
-  position          Int                  @default(0)
-  displayGroupId    String?
-  missingCount      Int                  @default(0)
-  firstSeenAt       DateTime             @default(now())
-  lastSeenAt        DateTime             @default(now())
-  sourceUpdatedAt   DateTime?
-  rawMetadata       Json?
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-  displayGroup      GatewayDisplayGroup? @relation(fields: [displayGroupId], references: [id], onDelete: SetNull)
-  probeConfig       GatewayProbeConfig?
+  id                  String               @id @default(cuid())
+  sourceKey           String
+  sourceSiteId        String
+  slug                String               @unique
+  name                String
+  description         String               @default("")
+  sourceSection       String               @default("all")
+  sourcePosition      Int?
+  sourceRedirectUrl   String
+  destinationUrl      String?
+  destinationHost     String?
+  providerType        String               @default("第三方")
+  logoUrl             String?
+  sponsored           Boolean              @default(false)
+  online              Boolean?
+  upVotes             Int                  @default(0)
+  downVotes           Int                  @default(0)
+  availability7d      Float?
+  averageResponseMs   Int?
+  modelTags           String[]             @default([])
+  pricingClaims       String?
+  reviewStatus        GatewayReviewStatus  @default(PENDING)
+  active              Boolean              @default(false)
+  featured            Boolean              @default(false)
+  position            Int                  @default(0)
+  displayGroupId      String?
+  missingCount        Int                  @default(0)
+  firstSeenAt         DateTime             @default(now())
+  lastSeenAt          DateTime             @default(now())
+  sourceUpdatedAt     DateTime?
+  rawMetadata         Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  displayGroup        GatewayDisplayGroup? @relation(fields: [displayGroupId], references: [id], onDelete: SetNull)
+  probeConfig         GatewayProbeConfig?
 
   @@unique([sourceKey, sourceSiteId])
   @@index([reviewStatus, active, updatedAt])
@@ -766,26 +946,26 @@ model GatewayDirectorySyncRun {
 }
 
 model SearchAd {
-  id              String    @id @default(cuid())
-  title           String
-  description     String    @default("")
-  descriptionContent Json?
-  url             String
-  imageUrl        String?
+  id                  String    @id @default(cuid())
+  title               String
+  description         String    @default("")
+  descriptionContent  Json?
+  url                 String
+  imageUrl            String?
   backgroundObjectKey String?
-  logoUrl         String?
-  logoObjectKey   String?
-  label           String    @default("广告")
-  keywords        String[]  @default([])
-  global          Boolean   @default(false)
-  active          Boolean   @default(true)
-  position        Int       @default(0)
-  startsAt        DateTime?
-  endsAt          DateTime?
-  impressionCount Int       @default(0)
-  clickCount      Int       @default(0)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  logoUrl             String?
+  logoObjectKey       String?
+  label               String    @default("广告")
+  keywords            String[]  @default([])
+  global              Boolean   @default(false)
+  active              Boolean   @default(true)
+  position            Int       @default(0)
+  startsAt            DateTime?
+  endsAt              DateTime?
+  impressionCount     Int       @default(0)
+  clickCount          Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@index([active, position])
   @@index([startsAt, endsAt])
@@ -796,7 +976,7 @@ model SiteSetting {
   siteName                 String   @default("AI卡网")
   slogan                   String   @default("AICardHub")
   description              String   @default("聚合授权店铺的公开报价，让数字商品检索与比价更清晰。")
-  seoTitle                  String   @default("全网数字商品货源比价")
+  seoTitle                 String   @default("全网数字商品货源比价")
   seoDescription           String   @default("聚合已授权数字商店的公开商品与价格，快速比较同款货源。")
   seoKeywords              String[] @default([])
   logoObjectKey            String?
@@ -826,18 +1006,18 @@ model HomeBanner {
 }
 
 model SideAd {
-  id              String    @id @default(cuid())
+  id              String     @id @default(cuid())
   slot            SideAdSlot @unique
-  title           String    @default("")
-  url             String    @default("https://example.com")
+  title           String     @default("")
+  url             String     @default("https://example.com")
   imageUrl        String?
   imageObjectKey  String?
-  label           String    @default("广告")
-  active          Boolean   @default(false)
-  impressionCount Int       @default(0)
-  clickCount      Int       @default(0)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  label           String     @default("广告")
+  active          Boolean    @default(false)
+  impressionCount Int        @default(0)
+  clickCount      Int        @default(0)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   @@index([active, slot])
 }

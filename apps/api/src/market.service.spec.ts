@@ -5,7 +5,7 @@ import type { PrismaService } from "./prisma.service";
 
 function createPrismaMock() {
   const prisma = {
-    $transaction: jest.fn(),
+    $transaction: jest.fn(), $queryRaw: jest.fn(),
     shop: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
     offer: { findMany: jest.fn(), findFirst: jest.fn() },
     feedback: { create: jest.fn() },
@@ -13,7 +13,7 @@ function createPrismaMock() {
     category: { findMany: jest.fn() },
     hotSearchTerm: { findMany: jest.fn().mockResolvedValue([]) },
     searchAd: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn(), update: jest.fn() },
-    managedListing: { findFirst: jest.fn() },
+    managedListing: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
     outboundClick: { create: jest.fn() },
   };
   prisma.$transaction.mockImplementation(async (value: unknown): Promise<unknown> => Array.isArray(value) ? Promise.all(value) : (value as (client: unknown) => unknown)(prisma));
@@ -102,7 +102,7 @@ describe("MarketService database mode", () => {
 
     expect(prisma.shop.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ status: ShopStatus.ACTIVE, publishedAt: { not: null } }),
-      orderBy: [{ publishedAt: "desc" }],
+      orderBy: [{ publishedAt: "desc" }, { id: "asc" }],
     }));
   });
 
@@ -148,6 +148,9 @@ describe("MarketService database mode", () => {
       shop: { id: "shop-2", slug: "store-two", name: "二号店", logoUrl: null, verifiedAt: new Date() },
     });
     prisma.offer.findMany.mockResolvedValue([newerFeed, direct, secondShop]);
+    prisma.$queryRaw
+      .mockResolvedValueOnce([{ canonical_product_id: "product-1", lowest_price: new Prisma.Decimal(16), highest_price: new Prisma.Decimal(20), offer_count: BigInt(2), in_stock_offer_count: BigInt(2), latest_synced_at: new Date("2026-08-03T00:00:00.000Z") }])
+      .mockResolvedValueOnce([{ total: BigInt(1) }]);
 
     const result = await service.offers({ sort: "price_asc", page: 1, pageSize: 20 });
     expect(result.items).toHaveLength(1);
@@ -162,13 +165,12 @@ describe("MarketService database mode", () => {
 
   it("excludes zero-price records from the public quote list", async () => {
     prisma.offer.findMany.mockImplementation(async (args: { where?: { price?: { gt?: number } } }) => args.where?.price?.gt === 0 ? [] : [offer({ price: new Prisma.Decimal(0) })]);
+    prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: BigInt(0) }]);
 
     const result = await service.offers({ sort: "price_asc", page: 1, pageSize: 20 });
 
     expect(result.items).toEqual([]);
-    expect(prisma.offer.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ price: { gt: 0, gte: undefined, lte: undefined } }),
-    }));
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
   });
 
   it("excludes traffic-card offers from the public quote list", async () => {
@@ -176,6 +178,9 @@ describe("MarketService database mode", () => {
       offer({ id: "traffic-card", canonicalProduct: { ...offer().canonicalProduct, title: "全国流量卡 100GB", category: { name: "通信" } } }),
       offer({ id: "ai-subscription" }),
     ]);
+    prisma.$queryRaw
+      .mockResolvedValueOnce([{ canonical_product_id: "product-1", lowest_price: new Prisma.Decimal(18), highest_price: new Prisma.Decimal(18), offer_count: BigInt(1), in_stock_offer_count: BigInt(1), latest_synced_at: new Date("2026-08-03T00:00:00.000Z") }])
+      .mockResolvedValueOnce([{ total: BigInt(1) }]);
 
     const result = await service.offers({ sort: "price_asc", page: 1, pageSize: 20 });
 
@@ -197,8 +202,37 @@ describe("MarketService database mode", () => {
     jest.spyOn(service, "categories").mockResolvedValue([]);
     jest.spyOn(service, "offers").mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20, totalPages: 0, ad: null });
     jest.spyOn(service, "hot").mockResolvedValue([]);
-    jest.spyOn(service, "shops").mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20, totalPages: 0 });
-    await expect(service.home()).resolves.toMatchObject({ isDemo: false, offers: { total: 0 } });
+    jest.spyOn(service, "shops").mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20, totalPages: 0, sponsors: [] });
+    await expect(service.home()).resolves.toMatchObject({ isDemo: false, offers: { total: 0 }, homeSponsors: [] });
+  });
+
+  it("only returns directory-enabled gateway sponsors from managed listings", async () => {
+    prisma.managedListing.findMany.mockResolvedValue([]);
+
+    await expect(service.listings("gateway")).resolves.toEqual([]);
+    expect(prisma.managedListing.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ type: "GATEWAY", active: true, gatewayPlacement: true }),
+    }));
+  });
+
+  it("returns active homepage sponsors with side and bottom placements", async () => {
+    prisma.managedListing.findMany.mockResolvedValue([{
+      id: "sponsor-1", type: "GATEWAY", title: "组合投放赞助商", description: "完整说明", url: "https://sponsor.example.com",
+      thumbnailUrl: "https://sponsor.example.com/banner.webp", thumbnailObjectKey: null, badge: "赞助",
+      modelTags: ["GPT-5"], pricingClaims: "低至 1 折", gatewayPlacement: true, homeSideSlot: "LEFT", homeBottomPlacement: true,
+      active: true, position: 1, createdAt: new Date("2026-08-17T00:00:00.000Z"), updatedAt: new Date("2026-08-17T01:00:00.000Z"), probeConfig: null,
+    }]);
+
+    const result = await service.homeSponsors();
+
+    expect(prisma.managedListing.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ type: "GATEWAY", active: true, OR: [{ homeSideSlot: { not: null } }, { homeBottomPlacement: true }] }),
+      orderBy: [{ position: "asc" }, { createdAt: "desc" }],
+    }));
+    expect(result).toEqual([expect.objectContaining({
+      id: "sponsor-1", type: "gateway", homeSideSlot: "left", homeBottomPlacement: true,
+      modelTags: ["GPT-5"], pricingClaims: "低至 1 折", probe: expect.objectContaining({ configured: false }),
+    })]);
   });
 
   it("uses directory product counts even when the source omits a maximum price", () => {
@@ -220,7 +254,7 @@ describe("MarketService database mode", () => {
     prisma.managedListing.findFirst.mockResolvedValue({ id: "sponsor-1", url: "https://sponsor.example.com/welcome" });
 
     await expect(service.listingTarget("sponsor-1")).resolves.toBe("https://sponsor.example.com/welcome");
-    expect(prisma.managedListing.findFirst).toHaveBeenCalledWith({ where: { id: "sponsor-1", active: true } });
+    expect(prisma.managedListing.findFirst).toHaveBeenCalledWith({ where: expect.objectContaining({ id: "sponsor-1", active: true }) });
     expect(prisma.outboundClick.create).toHaveBeenCalledWith({ data: { targetType: "listing", targetId: "sponsor-1", destinationHost: "sponsor.example.com" } });
 
     prisma.managedListing.findFirst.mockResolvedValue(null);

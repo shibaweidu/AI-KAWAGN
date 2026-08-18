@@ -11,6 +11,9 @@ export type ManagedListingItem = {
   badge: string | null;
   modelTags?: string[];
   pricingClaims?: string | null;
+  gatewayPlacement?: boolean;
+  homeSideSlot?: "left" | "right" | null;
+  homeBottomPlacement?: boolean;
   probe?: { configured: boolean; status: "online" | "partial" | "offline" | "unconfigured"; availableModels: number; totalModels: number; lastCheckedAt: string | null } | null;
 };
 

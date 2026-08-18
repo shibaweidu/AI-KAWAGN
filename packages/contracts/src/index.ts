@@ -384,6 +384,31 @@ export const searchAdInputSchema = z.object({
 
 export const searchAdPageSchema = offerPageSchema.extend({ ad: searchAdSchema.nullable() });
 
+const homeSponsorSchema = z.object({
+  id: z.string(),
+  type: z.literal("gateway"),
+  title: z.string(),
+  description: z.string(),
+  url: z.string().url(),
+  thumbnailUrl: z.string().nullable(),
+  badge: z.string().nullable(),
+  modelTags: z.array(z.string()),
+  pricingClaims: z.string().nullable(),
+  homeSideSlot: sideAdSlotSchema.nullable(),
+  homeBottomPlacement: z.boolean(),
+  probe: z.object({
+    configured: z.boolean(),
+    status: z.enum(["online", "partial", "offline", "unconfigured"]),
+    availableModels: z.number().int().min(0),
+    totalModels: z.number().int().min(0),
+    lastCheckedAt: z.string().nullable(),
+  }).nullable().optional(),
+  active: z.boolean(),
+  position: z.number().int(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 export const homeResponseSchema = z.object({
   isDemo: z.boolean(),
   banner: homeBannerSchema.nullable(),
@@ -393,6 +418,7 @@ export const homeResponseSchema = z.object({
   offers: offerPageSchema,
   directoryShops: z.array(shopSchema).default([]),
   sideAds: z.array(sideAdSchema).default([]),
+  homeSponsors: z.array(homeSponsorSchema).default([]),
 });
 
 export const searchSuggestionsSchema = z.object({ suggestions: z.array(z.string()).max(8) });
@@ -586,6 +612,9 @@ export const managedListingSchema = z.object({
   badge: z.string().nullable(),
   modelTags: z.array(z.string()),
   pricingClaims: z.string().nullable(),
+  gatewayPlacement: z.boolean().optional(),
+  homeSideSlot: sideAdSlotSchema.nullable().optional(),
+  homeBottomPlacement: z.boolean().optional(),
   probe: z.object({
     configured: z.boolean(),
     status: z.enum(["online", "partial", "offline", "unconfigured"]),
@@ -614,6 +643,9 @@ export const managedListingInputSchema = z.object({
   badge: z.preprocess((value) => value === "" || value === null ? undefined : value, z.string().trim().max(30).optional()),
   modelTags: managedListingModelTagsSchema,
   pricingClaims: z.preprocess((value) => value === "" || value === null ? undefined : value, z.string().trim().max(100).optional()),
+  gatewayPlacement: z.preprocess((value) => value === true || value === "true" || value === "1", z.boolean().default(false)),
+  homeSideSlot: z.preprocess((value) => value === "" || value === null ? undefined : value, sideAdSlotSchema.optional()),
+  homeBottomPlacement: z.preprocess((value) => value === true || value === "true" || value === "1", z.boolean().default(false)),
   clearThumbnail: z.preprocess((value) => value === "true" ? true : value === "false" || value === "" || value === undefined ? false : value, z.boolean().default(false)),
 });
 
@@ -736,42 +768,6 @@ export const authorizedShopSyncSchema = z.object({
   products: z.array(authorizedShopProductSchema).max(10_000),
 });
 
-export const priceAiPointerSchema = z.object({
-  schema_version: z.literal("price-radar.v1"),
-  snapshot_id: z.string().min(10),
-  generated_at: z.string().datetime(),
-  published_at: z.string().datetime(),
-  stale: z.boolean(),
-  snapshot_url: z.string().url().refine((value) => value.startsWith("https://data.priceai.cc/v1/snapshots/"), "Unexpected snapshot host"),
-  product_count: z.number().int().min(0),
-});
-
-export const priceAiOfferSchema = z.object({
-  id: z.string(),
-  source_id: z.string().nullable().optional(),
-  source_name: z.string(),
-  source_store_name: z.string().nullable().optional(),
-  title: z.string(),
-  price: z.number().min(0),
-  currency: z.string(),
-  status: z.string(),
-  url: z.string().url(),
-});
-
-export const priceAiSnapshotSchema = z.object({
-  schema_version: z.literal("price-radar.v1"),
-  snapshot_id: z.string().min(10),
-  generated_at: z.string().datetime(),
-  published_at: z.string().datetime(),
-  stale: z.boolean(),
-  product_count: z.number().int().min(0).optional(),
-  products: z.array(z.object({
-    id: z.string(), slug: z.string(), name: z.string(), platform: z.string(), product_type: z.string(),
-    spec: z.string().optional(), summary: z.string().optional(), snapshot_generated_at: z.string().datetime({ offset: true }),
-    top_offers: z.array(priceAiOfferSchema).max(5),
-  })).max(5000),
-});
-
 export const submissionSchema = z.object({
   kind: z.enum(["shop", "gateway"]).default("shop"),
   name: z.string().trim().min(1).max(200),
@@ -862,8 +858,6 @@ export type CategoryBrowsePage = z.infer<typeof categoryBrowsePageSchema>;
 export type ImportRow = z.infer<typeof importRowSchema>;
 export type CandidateDecision = z.infer<typeof candidateDecisionSchema>;
 export type AuthorizedShopSync = z.infer<typeof authorizedShopSyncSchema>;
-export type PriceAiPointer = z.infer<typeof priceAiPointerSchema>;
-export type PriceAiSnapshot = z.infer<typeof priceAiSnapshotSchema>;
 export type ManagedListing = z.infer<typeof managedListingSchema>;
 export type ManagedListingInput = z.infer<typeof managedListingInputSchema>;
 export type ManagedListingProbeDetail = z.infer<typeof managedListingProbeDetailSchema>;

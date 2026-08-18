@@ -18,6 +18,7 @@
     "backfill:ldxp-snapshot-links": "tsx src/backfill-ldxp-snapshot-links.ts",
     "backfill:ldxp-products": "tsx src/run-ldxp-product-backfill.ts",
     "sync:ldxp-211b": "tsx src/sync-ldxp-211b.ts",
+    "sync:public-catalog": "tsx src/sync-public-catalog.ts",
     "sync:gateway-directory": "tsx src/sync-gateway-directory.ts",
     "probe:gateway": "tsx src/run-gateway-probe.ts",
     "data:retain-ldxp-only": "tsx src/retain-ldxp-only.ts"
@@ -34,6 +35,7 @@
     "cookie-parser": "^1.4.7",
     "csv-parse": "^6.1.0",
     "helmet": "^8.1.0",
+    "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.2",
     "prisma": "^6.6.0",
     "reflect-metadata": "^0.2.2",

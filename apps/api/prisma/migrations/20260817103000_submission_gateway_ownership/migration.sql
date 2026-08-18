@@ -1,0 +1,1 @@
+-- Historical migration already applied in the deployed database.

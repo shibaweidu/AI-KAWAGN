@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { promises as dns } from "node:dns";
 import { XMLParser } from "fast-xml-parser";
-import { priceAiPointerSchema, priceAiSnapshotSchema, type PriceAiPointer, type PriceAiSnapshot } from "@ai-card/contracts";
 
 export type DiscoveredShop = { name: string; sourceId: string; homepage: string };
 export type RawProduct = { id: string; title: string; description?: string; price: number | string; stock?: number; url: string; category?: string };
@@ -146,44 +145,140 @@ export class DujiaokaAdapter extends JsonApiAdapter {
   constructor() { super("/api/v1/products"); }
 }
 
-export class PriceAiFeedClient {
-  static readonly pointerUrl = new URL("https://data.priceai.cc/latest.json");
+export type PublicCatalogShop = {
+  externalId: string;
+  name: string;
+  shopUrl: string;
+  observedAt: string;
+  rawMetadata: Record<string, unknown>;
+};
 
-  async fetchPointer(cache: { etag?: string | null; lastModified?: string | null } = {}): Promise<{
-    notModified: boolean;
-    etag: string | null;
-    lastModified: string | null;
-    pointer?: PriceAiPointer;
-    raw?: string;
-  }> {
-    const response = await safeFetch(PriceAiFeedClient.pointerUrl, {
+export type PublicCatalogOffer = {
+  externalId: string;
+  shopExternalId: string;
+  shopName: string;
+  shopUrl: string;
+  externalProductId: string;
+  productName: string;
+  specification: string;
+  category: string;
+  price: number;
+  currency: string;
+  stock: number | null;
+  stockStatus: string;
+  offerUrl: string;
+  observedAt: string;
+  rawMetadata: Record<string, unknown>;
+};
+
+export type PublicCatalogSnapshot = {
+  snapshotId: string;
+  generatedAt: string;
+  shops: PublicCatalogShop[];
+  offers: PublicCatalogOffer[];
+  rejectedShops: number;
+  rejectedOffers: number;
+  raw: string;
+  etag: string | null;
+  lastModified: string | null;
+};
+
+type CardnavPayload = { c?: unknown; p?: unknown; s?: unknown; pc?: unknown; sc?: unknown };
+
+export function parseCardnavPayload(payload: unknown): Omit<PublicCatalogSnapshot, "snapshotId" | "raw" | "etag" | "lastModified"> {
+  const body = isRecord(payload) ? payload as CardnavPayload : {};
+  const categories = Array.isArray(body.c) ? body.c : [];
+  const shopRows = Array.isArray(body.s) ? body.s : [];
+  const productRows = Array.isArray(body.p) ? body.p : [];
+  if (shopRows.length > 20_000 || productRows.length > 50_000) throw new Error("Cardnav payload exceeds catalog limits");
+
+  const shopsByIndex = new Map<number, PublicCatalogShop>();
+  let rejectedShops = 0;
+  shopRows.forEach((value, index) => {
+    if (!Array.isArray(value)) { rejectedShops += 1; return; }
+    const externalId = textValue(value[0]);
+    const name = textValue(value[1]);
+    const shopUrl = catalogHttpsUrl(value[2]);
+    if (!externalId || !name || !shopUrl) { rejectedShops += 1; return; }
+    const observedAt = catalogDate(value[3]);
+    shopsByIndex.set(index, {
+      externalId,
+      name,
+      shopUrl,
+      observedAt,
+      rawMetadata: { score: finiteNumber(value[4]), featured: value[5] === 1 },
+    });
+  });
+
+  const offers: PublicCatalogOffer[] = [];
+  let rejectedOffers = 0;
+  for (const value of productRows) {
+    if (!Array.isArray(value)) { rejectedOffers += 1; continue; }
+    const shop = shopsByIndex.get(Number(value[0]));
+    const category = textValue(categories[Number(value[1])]) || "其他";
+    const productName = textValue(value[2]);
+    const price = finiteNumber(value[3]);
+    const offerUrl = catalogHttpsUrl(value[5]);
+    if (!shop || !productName || price === null || price < 0 || price > 1_000_000 || !offerUrl) { rejectedOffers += 1; continue; }
+    const stock = nonNegativeInteger(value[6]);
+    const observedAt = catalogDate(value[8]);
+    offers.push({
+      externalId: stableUrlId(offerUrl),
+      shopExternalId: shop.externalId,
+      shopName: shop.name,
+      shopUrl: shop.shopUrl,
+      externalProductId: stableUrlId(offerUrl),
+      productName,
+      specification: "",
+      category,
+      price,
+      currency: "CNY",
+      stock,
+      stockStatus: value[7] === 0 || stock === 0 ? "out_of_stock" : "in_stock",
+      offerUrl,
+      observedAt,
+      rawMetadata: { imageUrl: catalogHttpsUrl(value[4]), score: finiteNumber(value[9]), categoryIndex: Number(value[1]) },
+    });
+  }
+
+  const generatedAt = offers.reduce((latest, offer) => offer.observedAt > latest ? offer.observedAt : latest, new Date(0).toISOString());
+  return { generatedAt, shops: [...shopsByIndex.values()], offers, rejectedShops, rejectedOffers };
+}
+
+export class CardnavCatalogClient {
+  static readonly catalogUrl = new URL("https://cardnav.xyz/api/shop-products.json");
+
+  async fetchSnapshot(cache: { etag?: string | null; lastModified?: string | null } = {}): Promise<PublicCatalogSnapshot | { notModified: true; etag: string | null; lastModified: string | null }> {
+    const response = await safeFetch(CardnavCatalogClient.catalogUrl, {
       accept: "application/json",
       etag: cache.etag,
       lastModified: cache.lastModified,
-      maxBytes: 128 * 1024,
+      maxBytes: 24 * 1024 * 1024,
+      timeoutMs: 30_000,
     });
-    const metadata = { etag: response.headers.get("etag"), lastModified: response.headers.get("last-modified") };
-    if (response.status === 304) return { notModified: true, ...metadata };
-    if (!response.ok) throw new Error(`PriceAI pointer returned ${response.status}`);
-    if (!response.headers.get("content-type")?.includes("application/json")) throw new Error("PriceAI pointer returned an unexpected content type");
-    const raw = await readLimitedText(response, 128 * 1024);
-    return { notModified: false, ...metadata, pointer: priceAiPointerSchema.parse(JSON.parse(raw)), raw };
-  }
-
-  async fetchSnapshot(pointer: PriceAiPointer): Promise<{ snapshot: PriceAiSnapshot; raw: string }> {
-    const snapshotUrl = new URL(pointer.snapshot_url);
-    if (snapshotUrl.protocol !== "https:" || snapshotUrl.hostname !== "data.priceai.cc" || !snapshotUrl.pathname.startsWith("/v1/snapshots/")) {
-      throw new Error("Unexpected PriceAI snapshot URL");
-    }
-    const response = await safeFetch(snapshotUrl, { accept: "application/json", maxBytes: 12 * 1024 * 1024, timeoutMs: 30_000 });
-    if (!response.ok) throw new Error(`PriceAI snapshot returned ${response.status}`);
-    if (!response.headers.get("content-type")?.includes("application/json")) throw new Error("PriceAI snapshot returned an unexpected content type");
-    const raw = await readLimitedText(response, 12 * 1024 * 1024);
-    const snapshot = priceAiSnapshotSchema.parse(JSON.parse(raw));
-    if (snapshot.snapshot_id !== pointer.snapshot_id) throw new Error("PriceAI snapshot ID mismatch");
-    return { snapshot, raw };
+    const etag = response.headers.get("etag");
+    const lastModified = response.headers.get("last-modified");
+    if (response.status === 304) return { notModified: true, etag, lastModified };
+    if (!response.ok) throw new Error(`Cardnav catalog returned ${response.status}`);
+    if (!response.headers.get("content-type")?.includes("application/json")) throw new Error("Cardnav catalog returned an unexpected content type");
+    const raw = await readLimitedText(response, 24 * 1024 * 1024);
+    const parsed = parseCardnavPayload(JSON.parse(raw));
+    return { ...parsed, snapshotId: createHash("sha256").update(raw).digest("hex"), raw, etag, lastModified };
   }
 }
+
+function isRecord(value: unknown): value is Record<string, any> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function textValue(value: unknown) { return typeof value === "string" ? value.trim() : ""; }
+function finiteNumber(value: unknown) { const number = Number(value); return Number.isFinite(number) ? number : null; }
+function nonNegativeInteger(value: unknown) { const number = Number(value); return Number.isInteger(number) && number >= 0 ? number : null; }
+function boundedTotal(value: unknown) { const number = Number(value); if (!Number.isInteger(number) || number < 0 || number > 50_000) throw new Error("Catalog total is outside allowed limits"); return number; }
+function catalogDate(value: unknown) { const timestamp = typeof value === "number" ? value : Date.parse(String(value || "")); return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date().toISOString(); }
+function catalogHttpsUrl(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try { const url = new URL(value.trim()); if (url.protocol !== "https:" || url.username || url.password) return null; url.hash = ""; return url.href; } catch { return null; }
+}
+function stableUrlId(value: string) { return createHash("sha256").update(value).digest("hex").slice(0, 32); }
+function normalizePublicCatalogStatus(value: string) { return /out|sold|unavailable|expired/i.test(value) ? "out_of_stock" : /low/i.test(value) ? "low_stock" : "in_stock"; }
 
 export type TaokayouShopReference = { externalId: string; directoryUrl: string; lastModified: string | null };
 export type TaokayouShopMetadata = {

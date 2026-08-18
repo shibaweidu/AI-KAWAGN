@@ -1,10 +1,11 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { DataSourceKind, GatewayReviewStatus, Prisma, SyncStatus } from "@prisma/client";
 import { gatewayDecisionSchema, gatewayDirectoryQuerySchema } from "@ai-card/contracts";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { PrismaService } from "./prisma.service";
+import { CacheService } from "./cache.service";
 
 const SOURCE_KEY = "zuiquanapi";
 const MANUAL_SOURCE_KEY = "manual";
@@ -54,11 +55,16 @@ type SourceGateway = {
 
 @Injectable()
 export class GatewayDirectoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, @Optional() private readonly cache?: CacheService) {}
+
+  private cached<T>(key: string, ttlSeconds: number, loader: () => Promise<T>) {
+    return this.cache ? this.cache.getOrSet(key, ttlSeconds, loader) : loader();
+  }
 
   async listPublic(raw: Record<string, unknown>) {
     const query = gatewayDirectoryQuerySchema.parse(raw);
-    const where: Prisma.GatewayDirectoryEntryWhereInput = {
+    return this.cached(CacheService.key("gateway-directory:list", query), 60, async () => {
+      const where: Prisma.GatewayDirectoryEntryWhereInput = {
       active: true,
       reviewStatus: GatewayReviewStatus.APPROVED,
       sourceSection: query.section || undefined,
@@ -69,9 +75,9 @@ export class GatewayDirectoryService {
         { modelTags: { has: query.q.toLocaleLowerCase("zh-CN") } },
         { pricingClaims: { contains: query.q, mode: "insensitive" } },
       ] : undefined,
-    };
-    const orderBy = gatewayOrder(query.sort);
-    const [items, total, sectionGroups] = await this.prisma.$transaction([
+      };
+      const orderBy = gatewayOrder(query.sort);
+      const [items, total, sectionGroups] = await this.prisma.$transaction([
       this.prisma.gatewayDirectoryEntry.findMany({
         where,
         orderBy,
@@ -86,23 +92,25 @@ export class GatewayDirectoryService {
         orderBy: { sourceSection: "asc" },
         _count: { sourceSection: true },
       }),
-    ]);
-    return {
-      items: items.map(publicGateway),
-      total,
-      page: query.page,
-      pageSize: query.pageSize,
-      totalPages: total ? Math.ceil(total / query.pageSize) : 0,
-      sections: sectionGroups
-        .map((group) => ({ key: group.sourceSection, label: SECTION_LABELS[group.sourceSection] || group.sourceSection, count: groupedCount(group._count, "sourceSection") }))
-        .sort((a, b) => sectionOrder(a.key) - sectionOrder(b.key)),
-    };
+      ]);
+      return {
+        items: items.map(publicGateway),
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
+        totalPages: total ? Math.ceil(total / query.pageSize) : 0,
+        sections: sectionGroups
+          .map((group) => ({ key: group.sourceSection, label: SECTION_LABELS[group.sourceSection] || group.sourceSection, count: groupedCount(group._count, "sourceSection") }))
+          .sort((a, b) => sectionOrder(a.key) - sectionOrder(b.key)),
+      };
+    });
   }
 
   async listGroupedPublic(raw: Record<string, unknown>) {
     await this.ensureDisplayGroups();
     const query = gatewayDirectoryQuerySchema.parse({ ...raw, page: raw.otherPage || raw.page });
-    const where: Prisma.GatewayDirectoryEntryWhereInput = {
+    return this.cached(CacheService.key("gateway-directory:grouped", query), 60, async () => {
+      const where: Prisma.GatewayDirectoryEntryWhereInput = {
       active: true,
       reviewStatus: GatewayReviewStatus.APPROVED,
       online: query.online,
@@ -112,9 +120,9 @@ export class GatewayDirectoryService {
         { modelTags: { has: query.q.toLocaleLowerCase("zh-CN") } },
         { pricingClaims: { contains: query.q, mode: "insensitive" } },
       ] : undefined,
-    };
-    const orderBy = gatewayOrder(query.sort);
-    const [groups, otherItems, otherTotal, total] = await this.prisma.$transaction([
+      };
+      const orderBy = gatewayOrder(query.sort);
+      const [groups, otherItems, otherTotal, total] = await this.prisma.$transaction([
       this.prisma.gatewayDisplayGroup.findMany({
         where: { active: true },
         orderBy: [{ position: "asc" }, { createdAt: "asc" }],
@@ -135,18 +143,19 @@ export class GatewayDirectoryService {
       }),
       this.prisma.gatewayDirectoryEntry.count({ where: { ...where, displayGroupId: null } }),
       this.prisma.gatewayDirectoryEntry.count({ where }),
-    ]);
-    return {
-      groups: groups.map((group) => ({ id: group.id, key: group.key, name: group.name, position: group.position, items: group.entries.map(publicGateway) })),
-      other: {
-        items: otherItems.map(publicGateway),
-        total: otherTotal,
-        page: query.page,
-        pageSize: query.pageSize,
-        totalPages: otherTotal ? Math.ceil(otherTotal / query.pageSize) : 0,
-      },
-      total,
-    };
+      ]);
+      return {
+        groups: groups.map((group) => ({ id: group.id, key: group.key, name: group.name, position: group.position, items: group.entries.map(publicGateway) })),
+        other: {
+          items: otherItems.map(publicGateway),
+          total: otherTotal,
+          page: query.page,
+          pageSize: query.pageSize,
+          totalPages: otherTotal ? Math.ceil(otherTotal / query.pageSize) : 0,
+        },
+        total,
+      };
+    });
   }
 
   async detail(slug: string) {

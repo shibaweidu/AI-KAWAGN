@@ -1,10 +1,11 @@
 import { managedListingInputSchema, searchAdInputSchema } from "@ai-card/contracts";
-import { IngestionService, isLdxp211bCandidate, isLdxpProductSyncDue, isLdxpProductSyncPending, normalize211bOrigin, normalizeApprovedHomepageUrl, parse211bDiscoveryInput, parse211bShopDirectory, parse211bShopProducts, parseImportRows, parseLdxpProductBackfillInput, parseLdxpSchedule, shouldDeactivateMissingLdxpOffer } from "./ingestion.service";
+import { IngestionService, isLdxp211bCandidate, isLdxpProductSyncDue, isLdxpProductSyncPending, normalize211bOrigin, normalizeApprovedHomepageUrl, normalizeCatalogUrl, parse211bDiscoveryInput, parse211bShopDirectory, parse211bShopProducts, parseImportRows, parseLdxpProductBackfillInput, parseLdxpSchedule, parseSourceSchedule, shouldDeactivateMissingLdxpOffer } from "./ingestion.service";
 
 describe("managed listing editor", () => {
   const current = {
     id: "listing-1", type: "GATEWAY", title: "原赞助商", description: "原说明", url: "https://old.example.com",
-    thumbnailUrl: null, thumbnailObjectKey: "managed-listings/original.webp", badge: null, active: true, position: 0,
+    thumbnailUrl: null, thumbnailObjectKey: "managed-listings/original.webp", badge: null, modelTags: [], pricingClaims: null,
+    gatewayPlacement: true, homeSideSlot: null, homeBottomPlacement: false, active: true, position: 0,
     createdAt: new Date("2026-08-14T00:00:00.000Z"), updatedAt: new Date("2026-08-14T00:00:00.000Z"),
   };
 
@@ -13,6 +14,37 @@ describe("managed listing editor", () => {
     expect(() => managedListingInputSchema.parse({ ...base, url: "http://example.com" })).toThrow();
     expect(() => managedListingInputSchema.parse({ ...base, url: "https://user:pass@example.com" })).toThrow();
     expect(managedListingInputSchema.parse({ ...base, url: "https://example.com" }).url).toBe("https://example.com");
+  });
+
+  it("parses independent directory, side and bottom placement fields", () => {
+    const result = managedListingInputSchema.parse({
+      type: "gateway", title: "赞助商", description: "", url: "https://example.com",
+      gatewayPlacement: "true", homeSideSlot: "right", homeBottomPlacement: "true",
+    });
+
+    expect(result).toMatchObject({ gatewayPlacement: true, homeSideSlot: "right", homeBottomPlacement: true });
+    expect(() => managedListingInputSchema.parse({
+      type: "gateway", title: "赞助商", description: "", url: "https://example.com", homeSideSlot: "center",
+    })).toThrow();
+  });
+
+  it("rejects a homepage side slot already occupied by another active sponsor", async () => {
+    const prisma = {
+      managedListing: {
+        findUnique: jest.fn().mockResolvedValue(current),
+        findFirst: jest.fn().mockResolvedValue({ title: "已有赞助商" }),
+      },
+    };
+    const service = new IngestionService(prisma as never, { put: jest.fn(), remove: jest.fn() } as never);
+
+    await expect(service.updateManagedListing("listing-1", {
+      type: "gateway", title: "原赞助商", description: "", url: "https://example.com",
+      gatewayPlacement: true, homeSideSlot: "left", homeBottomPlacement: true,
+    })).rejects.toThrow("首页左侧赞助位已被“已有赞助商”占用");
+    expect(prisma.managedListing.findFirst).toHaveBeenCalledWith({
+      where: { type: "GATEWAY", active: true, homeSideSlot: "LEFT", id: { not: "listing-1" } },
+      select: { title: true },
+    });
   });
 
   it("preserves the uploaded image when text is edited without a replacement", async () => {
@@ -122,12 +154,25 @@ describe("approved shop homepage", () => {
 
 describe("LDXP schedule", () => {
   it("accepts supported intervals", () => {
+    expect(parseLdxpSchedule({ enabled: true, intervalMinutes: 10 })).toEqual({ enabled: true, intervalMinutes: 10 });
     expect(parseLdxpSchedule({ enabled: true, intervalMinutes: 360 })).toEqual({ enabled: true, intervalMinutes: 360 });
   });
 
   it("rejects unsafe polling intervals", () => {
-    expect(() => parseLdxpSchedule({ enabled: true, intervalMinutes: 5 })).toThrow("30-1440");
+    expect(() => parseLdxpSchedule({ enabled: true, intervalMinutes: 5 })).toThrow("10-1440");
     expect(() => parseLdxpSchedule({ enabled: "true", intervalMinutes: 360 })).toThrow("布尔值");
+  });
+});
+
+describe("public catalog schedule and deduplication", () => {
+  it("normalizes equivalent LDXP shop and product links", () => {
+    expect(normalizeCatalogUrl("https://www.ldxp.cn/shop/Demo/?utm_source=feed#top")).toBe("https://pay.ldxp.cn/shop/Demo");
+    expect(normalizeCatalogUrl("https://pay.ldxp.cn/item/x/?utm_source=feed")).toBe("https://pay.ldxp.cn/item/x");
+  });
+
+  it("requires lower polling frequency for public catalog sources", () => {
+    expect(parseSourceSchedule({ enabled: true, intervalMinutes: 60 }, 60)).toEqual({ enabled: true, intervalMinutes: 60 });
+    expect(() => parseSourceSchedule({ enabled: true, intervalMinutes: 30 }, 60)).toThrow("60-1440");
   });
 });
 
@@ -153,6 +198,8 @@ describe("LDXP product backfill", () => {
     expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-10T23:00:00.000Z" }, true, runStartedAt)).toBe(true);
     expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-11T00:01:00.000Z" }, true, runStartedAt)).toBe(false);
     expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-10T23:00:00.000Z" }, false, runStartedAt)).toBe(false);
+    expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-10T23:00:00.000Z" }, false, runStartedAt, 10 * 60 * 1000)).toBe(true);
+    expect(isLdxpProductSyncDue({ productSyncedAt: "2026-08-11T00:05:00.000Z" }, false, runStartedAt, 10 * 60 * 1000)).toBe(false);
   });
 
   it("only deactivates an offer after two successful snapshots miss it", () => {

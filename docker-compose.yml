@@ -37,7 +37,7 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://aicard:aicard@postgres:5432/aicard}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://aicard:aicard@postgres:5432/aicard?connection_limit=10&pool_timeout=10}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       MEILI_HOST: ${MEILI_HOST:-http://meilisearch:7700}
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me}
@@ -54,6 +54,8 @@ services:
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
       SOURCE_211B_REQUEST_DELAY_MS: ${SOURCE_211B_REQUEST_DELAY_MS:-5000}
       ZUIQUANAPI_FEED_URL: ${ZUIQUANAPI_FEED_URL:-}
+      SLOW_QUERY_MS: ${SLOW_QUERY_MS:-300}
+      SEARCH_RATE_LIMIT: ${SEARCH_RATE_LIMIT:-120}
     ports: ["4000:4000"]
     depends_on: [postgres, redis, meilisearch, minio]
   worker:
@@ -61,7 +63,7 @@ services:
       context: .
       dockerfile: apps/worker/Dockerfile
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://aicard:aicard@postgres:5432/aicard}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://aicard:aicard@postgres:5432/aicard?connection_limit=5&pool_timeout=10}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       MEILI_HOST: ${MEILI_HOST:-http://meilisearch:7700}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}

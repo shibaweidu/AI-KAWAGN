@@ -1,11 +1,13 @@
 import { Injectable, NotFoundException, Optional } from "@nestjs/common";
-import { CandidateReviewStatus, CollectionMode, ManagedListingType, Prisma, ShopStatus } from "@prisma/client";
+import { CandidateReviewStatus, CollectionMode, ManagedListingType, SponsorAdKind, SponsorPlacementCampaignStatus, SponsorPlacementOrderStatus, SponsorPlacementSlotKind, Prisma, ShopStatus } from "@prisma/client";
 import {
   announcementSegmentSchema, categoryBrowseQuerySchema, demandSchema, feedbackSchema, offerFeedbackSchema, offerSearchQuerySchema, searchQuerySchema,
   shopDetailQuerySchema, shopListQuerySchema, type CategoryBrowseItem, type CategoryGroupId, type OfferListItem, type StockStatus,
 } from "@ai-card/contracts";
 import { PrismaService } from "./prisma.service";
 import { SiteSettingsService } from "./site-settings.service";
+import { CacheService } from "./cache.service";
+import { MeilisearchService } from "./meilisearch.service";
 
 export function getStockStatus(stock: number | null): StockStatus {
   if (stock === 0) return "out_of_stock";
@@ -50,9 +52,22 @@ const publicProductWhere: Prisma.CanonicalProductWhereInput = { NOT: blockedProd
 @Injectable()
 export class MarketService {
   private feedbackRateLimits = new Map<string, number[]>();
-  constructor(private readonly prisma: PrismaService, @Optional() private readonly settings?: SiteSettingsService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly settings?: SiteSettingsService,
+    @Optional() private readonly cache?: CacheService,
+    @Optional() private readonly searchIndex?: MeilisearchService,
+  ) {}
+
+  private cached<T>(key: string, ttlSeconds: number, loader: () => Promise<T>) {
+    return this.cache ? this.cache.getOrSet(key, ttlSeconds, loader) : loader();
+  }
 
   async stats() {
+    return this.cached("aicard:market:stats", 30, () => this.statsUncached());
+  }
+
+  private async statsUncached() {
     const activeShopWhere = { status: ShopStatus.ACTIVE, publishedAt: { not: null } } as const;
     const activeOfferWhere: Prisma.OfferWhereInput = { active: true, price: { gt: 0 }, shop: activeShopWhere, canonicalProduct: { is: publicProductWhere } };
     const since = new Date(Date.now() - 24 * 60 * 60_000);
@@ -81,82 +96,120 @@ export class MarketService {
   }
 
   async categories() {
-    const categories = await this.prisma.category.findMany({
-      include: { products: { where: { ...publicProductWhere, offers: { some: { active: true, price: { gt: 0 }, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } } } } }, select: { id: true } } },
-      orderBy: { name: "asc" },
+    return this.cached("aicard:market:categories", 600, async () => {
+      const categories = await this.prisma.category.findMany({
+        include: { products: { where: { ...publicProductWhere, offers: { some: { active: true, price: { gt: 0 }, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } } } } }, select: { id: true } } },
+        orderBy: { name: "asc" },
+      });
+      return categories.map((category) => ({ slug: category.slug, name: category.name, count: category.products.length }));
     });
-    return categories.map((category) => ({ slug: category.slug, name: category.name, count: category.products.length }));
   }
 
   async categoryBrowse(raw: Record<string, unknown> = {}) {
     const query = categoryBrowseQuerySchema.parse(raw);
-    const records = await this.prisma.category.findMany({
-      select: {
-        slug: true,
-        name: true,
-        _count: { select: { products: { where: { ...publicProductWhere, offers: { some: { active: true, price: { gt: 0 }, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } } } } } } } },
-      },
-      orderBy: { name: "asc" },
-    });
-    const merged = new Map<string, CategoryBrowseItem>();
-    for (const record of records) {
-      if (!record._count.products) continue;
-      const key = normalizeCategoryKey(record.name);
-      const existing = merged.get(key);
-      if (existing) {
-        existing.count += record._count.products;
-        continue;
+    return this.cached(CacheService.key("market:category-browse", query), 600, async () => {
+      const records = await this.prisma.category.findMany({
+        select: {
+          slug: true,
+          name: true,
+          _count: { select: { products: { where: { ...publicProductWhere, offers: { some: { active: true, price: { gt: 0 }, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } } } } } } } },
+        },
+        orderBy: { name: "asc" },
+      });
+      const merged = new Map<string, CategoryBrowseItem>();
+      for (const record of records) {
+        if (!record._count.products) continue;
+        const key = normalizeCategoryKey(record.name);
+        const existing = merged.get(key);
+        if (existing) {
+          existing.count += record._count.products;
+          continue;
+        }
+        const name = formatCategoryName(record.name);
+        merged.set(key, { slug: record.slug, name, count: record._count.products, group: categoryGroupFor(name) });
       }
-      const name = formatCategoryName(record.name);
-      merged.set(key, { slug: record.slug, name, count: record._count.products, group: categoryGroupFor(name) });
-    }
-    const allItems = [...merged.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "zh-CN"));
-    const needle = normalizeCategoryKey(query.q);
-    const filtered = allItems.filter((item) => (query.group === "all" || item.group === query.group) && (!needle || normalizeCategoryKey(item.name).includes(needle)));
-    const total = filtered.length;
-    const totalPages = total ? Math.ceil(total / query.pageSize) : 0;
-    const page = totalPages ? Math.min(query.page, totalPages) : 1;
-    const start = (page - 1) * query.pageSize;
-    return {
-      items: filtered.slice(start, start + query.pageSize),
-      popular: allItems.slice(0, 12),
-      groups: CATEGORY_GROUPS.map((group) => {
-        const items = group.id === "all" ? allItems : allItems.filter((item) => item.group === group.id);
-        return { ...group, categoryCount: items.length, productCount: items.reduce((sum, item) => sum + item.count, 0) };
-      }),
-      total, page, pageSize: query.pageSize, totalPages,
-    };
+      const allItems = [...merged.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "zh-CN"));
+      const needle = normalizeCategoryKey(query.q);
+      const filtered = allItems.filter((item) => (query.group === "all" || item.group === query.group) && (!needle || normalizeCategoryKey(item.name).includes(needle)));
+      const total = filtered.length;
+      const totalPages = total ? Math.ceil(total / query.pageSize) : 0;
+      const page = totalPages ? Math.min(query.page, totalPages) : 1;
+      const start = (page - 1) * query.pageSize;
+      return {
+        items: filtered.slice(start, start + query.pageSize),
+        popular: allItems.slice(0, 12),
+        groups: CATEGORY_GROUPS.map((group) => {
+          const items = group.id === "all" ? allItems : allItems.filter((item) => item.group === group.id);
+          return { ...group, categoryCount: items.length, productCount: items.reduce((sum, item) => sum + item.count, 0) };
+        }),
+        total, page, pageSize: query.pageSize, totalPages,
+      };
+    });
   }
 
   async shops(raw: Record<string, unknown> = {}) {
     const query = shopListQuerySchema.parse(raw);
-    const where: Prisma.ShopWhereInput = { status: ShopStatus.ACTIVE, publishedAt: { not: null } };
-    const orderBy: Prisma.ShopOrderByWithRelationInput[] = query.sort === "newest" ? [{ publishedAt: "desc" }] : [{ offers: { _count: "desc" } }];
-    const include = {
-      offers: { where: { active: true, price: { gt: 0 }, canonicalProduct: { is: publicProductWhere } }, select: { price: true, canonicalProductId: true, canonicalProduct: { select: { title: true, category: { select: { name: true } } } } } },
-      sourceMappings: { include: { dataSource: true }, take: 1 },
-      approvedCandidates: { where: { reviewStatus: CandidateReviewStatus.APPROVED }, select: { rawMetadata: true, sourceSyncedAt: true }, take: 1 },
-    };
-    if (query.sort === "products" || query.q) {
+    const page = await this.cached(CacheService.key("market:shops", query), 30, async () => {
+      const indexedIds = query.q ? await this.searchIndex?.searchIds("shops", query.q, "id") : null;
+      const where: Prisma.ShopWhereInput = {
+        status: ShopStatus.ACTIVE,
+        publishedAt: { not: null },
+        ...(indexedIds ? { id: { in: indexedIds } } : query.q ? { OR: [{ name: { contains: query.q, mode: "insensitive" } }, { description: { contains: query.q, mode: "insensitive" } }] } : {}),
+      };
+      const orderBy: Prisma.ShopOrderByWithRelationInput[] = query.sort === "newest" ? [{ publishedAt: "desc" }, { id: "asc" }] : [{ offers: { _count: "desc" } }, { publishedAt: "desc" }, { id: "asc" }];
+      const include = {
+        offers: { where: { active: true, price: { gt: 0 }, canonicalProduct: { is: publicProductWhere } }, select: { price: true, canonicalProductId: true, canonicalProduct: { select: { title: true, category: { select: { name: true } } } } } },
+        sourceMappings: { include: { dataSource: true }, take: 1 },
+        approvedCandidates: { where: { reviewStatus: CandidateReviewStatus.APPROVED }, select: { rawMetadata: true, sourceSyncedAt: true }, take: 1 },
+      };
       const [records, total] = await this.prisma.$transaction([
-        this.prisma.shop.findMany({ where, include, orderBy: [{ publishedAt: "desc" }] }),
+        this.prisma.shop.findMany({ where, include, orderBy, skip: (query.page - 1) * query.pageSize, take: query.pageSize }),
         this.prisma.shop.count({ where }),
       ]);
-      const needle = query.q.toLocaleLowerCase("zh-CN");
-      const items = records.map(toPublicShop)
-        .filter((shop) => !needle || `${shop.name} ${shop.categories.join(" ")}`.toLocaleLowerCase("zh-CN").includes(needle))
-        .sort(query.sort === "newest" ? (a, b) => b.syncedAt.localeCompare(a.syncedAt) : (a, b) => b.productCount - a.productCount || b.syncedAt.localeCompare(a.syncedAt));
-      const start = (query.page - 1) * query.pageSize;
-      return { items: items.slice(start, start + query.pageSize), total: items.length, page: query.page, pageSize: query.pageSize, totalPages: items.length ? Math.ceil(items.length / query.pageSize) : 0 };
+      return {
+        items: records.map(toPublicShop), total, page: query.page, pageSize: query.pageSize,
+        totalPages: total ? Math.ceil(total / query.pageSize) : 0,
+      };
+    });
+    return { ...page, sponsors: await this.shopSponsors() };
+  }
+
+  async shopSponsors() {
+    const campaignStore = (this.prisma as any).sponsorPlacementCampaign;
+    if (!campaignStore?.findMany) return [];
+    const now = new Date();
+    const campaigns = await campaignStore.findMany({
+      where: {
+        status: SponsorPlacementCampaignStatus.RUNNING,
+        startsAt: { lte: now },
+        endsAt: { gt: now },
+        order: { status: SponsorPlacementOrderStatus.APPROVED, sponsorAd: { kind: SponsorAdKind.SHOP, status: "APPROVED" } },
+        orderItem: { slotConfig: { kind: SponsorPlacementSlotKind.SHOP, enabled: true } },
+      },
+      include: { order: { include: { sponsorAd: true } }, orderItem: { include: { slotConfig: true } } },
+      orderBy: [{ orderItem: { slotConfig: { position: "asc" } } }, { createdAt: "asc" }],
+    });
+    const sponsors = new Map<string, { id: string; title: string; description: string; url: string; badge: string | null; modelTags: string[]; pricingClaims: string | null; imageUrl: string | null; kind: "shop"; slots: Array<{ key: string; name: string; position: number }> }>();
+    for (const campaign of campaigns) {
+      const ad = campaign.order.sponsorAd;
+      const current: {
+        id: string; title: string; description: string; url: string; badge: string | null; modelTags: string[]; pricingClaims: string | null; imageUrl: string | null; kind: "shop"; slots: Array<{ key: string; name: string; position: number }>;
+      } = sponsors.get(ad.id) || {
+        id: ad.id,
+        title: ad.title,
+        description: ad.description,
+        url: ad.url,
+        badge: ad.badge,
+        modelTags: ad.modelTags,
+        pricingClaims: ad.pricingClaims,
+        imageUrl: ad.imageObjectKey ? `/api/v1/assets/placements/${ad.id}` : ad.imageUrl,
+        kind: "shop" as const,
+        slots: [],
+      };
+      current.slots.push({ key: campaign.slotKey, name: campaign.orderItem.slotConfig.name, position: campaign.orderItem.slotConfig.position });
+      sponsors.set(ad.id, current);
     }
-    const [records, total] = await this.prisma.$transaction([
-      this.prisma.shop.findMany({ where, include, orderBy, skip: (query.page - 1) * query.pageSize, take: query.pageSize }),
-      this.prisma.shop.count({ where }),
-    ]);
-    return {
-      items: records.map(toPublicShop), total, page: query.page, pageSize: query.pageSize,
-      totalPages: total ? Math.ceil(total / query.pageSize) : 0,
-    };
+    return [...sponsors.values()].sort((a, b) => (a.slots[0]?.position || 0) - (b.slots[0]?.position || 0));
   }
 
   async shop(slug: string, raw: Record<string, unknown> = {}) {
@@ -241,12 +294,13 @@ export class MarketService {
   }
 
   async home() {
-    const [stats, categories, offers, hotSearches, directoryShops, banner, sideAds] = await Promise.all([
+    const [stats, categories, offers, hotSearches, directoryShops, banner, sideAds, homeSponsors] = await Promise.all([
       this.stats(), this.categories(), this.offers({ sort: "price_asc", page: 1, pageSize: 20 }), this.hotSearches(), this.shops({ sort: "products", page: 1, pageSize: 20 }),
       this.settings?.getActiveBanner() ?? null,
       this.settings?.getActiveSideAds() ?? [],
+      this.homeSponsors(),
     ]);
-    return { isDemo: false, banner, sideAds, stats, hotSearches, categories, offers, directoryShops: directoryShops.items.filter((shop) => shop.dataLevel === "directory") };
+    return { isDemo: false, banner, sideAds, homeSponsors, stats, hotSearches, categories, offers, directoryShops: directoryShops.items.filter((shop) => shop.dataLevel === "directory") };
   }
 
   async hotSearches() {
@@ -255,47 +309,144 @@ export class MarketService {
     return hotSearches;
   }
 
+  private async offerProductPage(query: ReturnType<typeof offerSearchQuerySchema.parse>, indexedProductIds: string[] | null) {
+    const blockedTerms = BLOCKED_PRODUCT_TERMS.map((term) => Prisma.sql`p."title" NOT ILIKE ${`%${term}%`} AND c."name" NOT ILIKE ${`%${term}%`}`);
+    const conditions = [
+      Prisma.sql`o."active" = true`,
+      Prisma.sql`o."price" > 0`,
+      Prisma.sql`s."status" = 'ACTIVE'::"ShopStatus"`,
+      Prisma.sql`s."publishedAt" IS NOT NULL`,
+      Prisma.sql`p."title" IS NOT NULL`,
+      ...blockedTerms,
+    ];
+    if (query.minPrice !== undefined) conditions.push(Prisma.sql`o."price" >= ${query.minPrice}`);
+    if (query.maxPrice !== undefined) conditions.push(Prisma.sql`o."price" <= ${query.maxPrice}`);
+    if (query.stock === "out_of_stock") conditions.push(Prisma.sql`o."stock" = 0`);
+    if (query.stock === "low_stock") conditions.push(Prisma.sql`o."stock" BETWEEN 1 AND 10`);
+    if (query.stock === "in_stock") conditions.push(Prisma.sql`o."stock" > 10`);
+    if (query.q) {
+      if (indexedProductIds) {
+        conditions.push(indexedProductIds.length ? Prisma.sql`p."id" IN (${Prisma.join(indexedProductIds)})` : Prisma.sql`false`);
+      } else {
+        conditions.push(Prisma.sql`p."title" ILIKE ${`%${query.q}%`}`);
+      }
+    }
+    if (query.category) conditions.push(Prisma.sql`(c."slug" = ${query.category} OR c."name" ILIKE ${query.category})`);
+    const where = Prisma.join(conditions, " AND ");
+    const orderBy = query.sort === "newest"
+      ? Prisma.sql`g."latest_synced_at" DESC, g."canonical_product_id" ASC`
+      : query.sort === "stock_desc"
+        ? Prisma.sql`g."in_stock_offer_count" DESC, g."offer_count" DESC, g."latest_synced_at" DESC`
+        : Prisma.sql`g."lowest_price" ASC, g."latest_synced_at" DESC, g."canonical_product_id" ASC`;
+    const offset = (query.page - 1) * query.pageSize;
+    const rows = await this.prisma.$queryRaw<Array<{
+      canonical_product_id: string;
+      lowest_price: Prisma.Decimal;
+      highest_price: Prisma.Decimal;
+      offer_count: bigint;
+      in_stock_offer_count: bigint;
+      latest_synced_at: Date;
+    }>>(Prisma.sql`
+      WITH ranked AS (
+        SELECT o."canonicalProductId" AS canonical_product_id, o."shopId" AS shop_id, o."id" AS offer_id,
+          o."price", o."stock", o."collectionMode", o."sourceObservedAt", o."syncedAt",
+          ROW_NUMBER() OVER (
+            PARTITION BY o."shopId", o."canonicalProductId"
+            ORDER BY CASE o."collectionMode" WHEN 'AUTHORIZED_DIRECT' THEN 3 WHEN 'MANUAL' THEN 2 ELSE 1 END DESC,
+              o."sourceObservedAt" DESC, o."syncedAt" DESC, o."id" ASC
+          ) AS preferred_rank
+        FROM "Offer" o
+        JOIN "Shop" s ON s."id" = o."shopId"
+        JOIN "CanonicalProduct" p ON p."id" = o."canonicalProductId"
+        JOIN "Category" c ON c."id" = p."categoryId"
+        WHERE ${where}
+      ), preferred AS (
+        SELECT * FROM ranked WHERE preferred_rank = 1
+      ), grouped AS (
+        SELECT canonical_product_id,
+          MIN(price) AS lowest_price,
+          MAX(price) AS highest_price,
+          COUNT(*)::bigint AS offer_count,
+          COUNT(*) FILTER (WHERE stock IS NULL OR stock <> 0)::bigint AS in_stock_offer_count,
+          MAX("syncedAt") AS latest_synced_at
+        FROM preferred
+        GROUP BY canonical_product_id
+      )
+      SELECT * FROM grouped g
+      ORDER BY ${orderBy}
+      LIMIT ${query.pageSize} OFFSET ${offset}
+    `);
+    const totalRows = await this.prisma.$queryRaw<Array<{ total: bigint }>>(Prisma.sql`
+      WITH ranked AS (
+        SELECT o."canonicalProductId" AS canonical_product_id, o."shopId" AS shop_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY o."shopId", o."canonicalProductId"
+            ORDER BY CASE o."collectionMode" WHEN 'AUTHORIZED_DIRECT' THEN 3 WHEN 'MANUAL' THEN 2 ELSE 1 END DESC,
+              o."sourceObservedAt" DESC, o."syncedAt" DESC, o."id" ASC
+          ) AS preferred_rank
+        FROM "Offer" o
+        JOIN "Shop" s ON s."id" = o."shopId"
+        JOIN "CanonicalProduct" p ON p."id" = o."canonicalProductId"
+        JOIN "Category" c ON c."id" = p."categoryId"
+        WHERE ${where}
+      )
+      SELECT COUNT(DISTINCT canonical_product_id)::bigint AS total FROM ranked WHERE preferred_rank = 1
+    `);
+    return { rows, total: Number(totalRows[0]?.total || 0) };
+  }
+
   async offers(raw: Record<string, unknown>) {
     const query = offerSearchQuerySchema.parse(raw);
-    const where: Prisma.OfferWhereInput = {
-      active: true, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } },
-      price: { gt: 0, gte: query.minPrice, lte: query.maxPrice },
-      stock: query.stock === "out_of_stock" ? 0 : query.stock === "low_stock" ? { gte: 1, lte: 10 } : query.stock === "in_stock" ? { gt: 10 } : undefined,
-      canonicalProduct: { is: { ...publicProductWhere, title: query.q ? { contains: query.q, mode: "insensitive" } : undefined, category: query.category ? { OR: [{ slug: query.category }, { name: { equals: query.category, mode: "insensitive" } }] } : undefined } },
-    };
-    const records = await this.prisma.offer.findMany({ where, include: { shop: true, dataSource: true, canonicalProduct: { include: { category: true } }, sourceProduct: true }, orderBy: { syncedAt: "desc" } });
-    const preferred = new Map<string, typeof records[number]>();
-    for (const offer of records) {
-      if (isBlockedProduct(offer.canonicalProduct.title, offer.canonicalProduct.category.name)) continue;
-      const key = `${offer.shopId}:${offer.canonicalProductId}`;
-      const current = preferred.get(key);
-      const currentPriority = current ? offerPriority(current.collectionMode) : -1;
-      const nextPriority = offerPriority(offer.collectionMode);
-      if (!current || nextPriority > currentPriority || (nextPriority === currentPriority && offer.sourceObservedAt > current.sourceObservedAt)) preferred.set(key, offer);
-    }
-    const grouped = new Map<string, OfferListItem[]>();
-    for (const offer of preferred.values()) {
-      const item = toOfferListItem(offer);
-      grouped.set(item.productId, [...(grouped.get(item.productId) || []), item]);
-    }
-    const result = Array.from(grouped.values()).map((items) => {
-      const sorted = items.sort((a, b) => a.price - b.price || b.syncedAt.localeCompare(a.syncedAt));
-      const product = sorted[0];
-      return { productId: product.productId, productSlug: product.productSlug, productName: product.productName, productThumbnailUrl: product.productThumbnailUrl, category: product.category, specification: product.specification, offerCount: sorted.length, inStockOfferCount: sorted.filter((offer) => offer.stockStatus !== "out_of_stock").length, verifiedShopCount: sorted.length, lowestPrice: sorted[0].price, highestPrice: sorted.at(-1)!.price, latestSyncedAt: sorted.reduce((latest, offer) => offer.syncedAt > latest ? offer.syncedAt : latest, ""), offers: sorted.map((offer, index) => ({ ...offer, isLowestPrice: index === 0 })) };
+    return this.cached(CacheService.key("market:offers", query), 15, async () => {
+      const indexedProductIds = query.q ? await this.searchIndex?.searchIds("offers", query.q, "productId") : null;
+      const pageData = await this.offerProductPage(query, indexedProductIds ?? null);
+      const pageProductIds = pageData.rows.map((row) => row.canonical_product_id);
+      const records = pageProductIds.length ? await this.prisma.offer.findMany({
+        where: {
+          active: true, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } },
+          price: { gt: 0, gte: query.minPrice, lte: query.maxPrice },
+          stock: query.stock === "out_of_stock" ? 0 : query.stock === "low_stock" ? { gte: 1, lte: 10 } : query.stock === "in_stock" ? { gt: 10 } : undefined,
+          canonicalProductId: { in: pageProductIds },
+          canonicalProduct: { is: publicProductWhere },
+        }, include: { shop: true, dataSource: true, canonicalProduct: { include: { category: true } }, sourceProduct: true }, orderBy: { syncedAt: "desc" },
+      }) : [];
+      const preferred = new Map<string, typeof records[number]>();
+      for (const offer of records) {
+        if (isBlockedProduct(offer.canonicalProduct.title, offer.canonicalProduct.category.name)) continue;
+        const key = `${offer.shopId}:${offer.canonicalProductId}`;
+        const current = preferred.get(key);
+        const currentPriority = current ? offerPriority(current.collectionMode) : -1;
+        const nextPriority = offerPriority(offer.collectionMode);
+        if (!current || nextPriority > currentPriority || (nextPriority === currentPriority && offer.sourceObservedAt > current.sourceObservedAt)) preferred.set(key, offer);
+      }
+      const grouped = new Map<string, OfferListItem[]>();
+      for (const offer of preferred.values()) {
+        const item = toOfferListItem(offer);
+        grouped.set(item.productId, [...(grouped.get(item.productId) || []), item]);
+      }
+      const result = Array.from(grouped.values()).map((items) => {
+        const sorted = items.sort((a, b) => a.price - b.price || b.syncedAt.localeCompare(a.syncedAt));
+        const product = sorted[0];
+        return { productId: product.productId, productSlug: product.productSlug, productName: product.productName, productThumbnailUrl: product.productThumbnailUrl, category: product.category, specification: product.specification, offerCount: sorted.length, inStockOfferCount: sorted.filter((offer) => offer.stockStatus !== "out_of_stock").length, verifiedShopCount: sorted.length, lowestPrice: sorted[0].price, highestPrice: sorted.at(-1)!.price, latestSyncedAt: sorted.reduce((latest, offer) => offer.syncedAt > latest ? offer.syncedAt : latest, ""), offers: sorted.map((offer, index) => ({ ...offer, isLowestPrice: index === 0 })) };
+      });
+      if (query.sort === "price_asc") result.sort((a, b) => a.lowestPrice - b.lowestPrice || b.latestSyncedAt.localeCompare(a.latestSyncedAt));
+      if (query.sort === "newest") result.sort((a, b) => b.latestSyncedAt.localeCompare(a.latestSyncedAt));
+      if (query.sort === "stock_desc") result.sort((a, b) => b.inStockOfferCount - a.inStockOfferCount || b.offerCount - a.offerCount);
+      const byProduct = new Map(result.map((item) => [item.productId, item]));
+      const items = pageProductIds.map((id) => byProduct.get(id)).filter((item): item is (typeof result)[number] => Boolean(item));
+      const total = pageData.total;
+      const page = { items, total, page: query.page, pageSize: query.pageSize, totalPages: total ? Math.ceil(total / query.pageSize) : 0 };
+      const ad = await this.searchAdFor([query.q, query.category].filter((value): value is string => Boolean(value)).join(" "));
+      return { ...page, ad };
     });
-    if (query.sort === "price_asc") result.sort((a, b) => a.lowestPrice - b.lowestPrice || b.latestSyncedAt.localeCompare(a.latestSyncedAt));
-    if (query.sort === "newest") result.sort((a, b) => b.latestSyncedAt.localeCompare(a.latestSyncedAt));
-    if (query.sort === "stock_desc") result.sort((a, b) => b.inStockOfferCount - a.inStockOfferCount || b.offerCount - a.offerCount);
-    const total = result.length;
-    const start = (query.page - 1) * query.pageSize;
-    const page = { items: result.slice(start, start + query.pageSize), total, page: query.page, pageSize: query.pageSize, totalPages: total ? Math.ceil(total / query.pageSize) : 0 };
-    const ad = await this.searchAdFor([query.q, query.category].filter((value): value is string => Boolean(value)).join(" "));
-    return { ...page, ad };
   }
 
   async suggestions(query = "") {
-    const records = await this.prisma.canonicalProduct.findMany({ where: { ...publicProductWhere, title: query.trim() ? { contains: query.trim(), mode: "insensitive" } : undefined, offers: { some: { active: true, price: { gt: 0 }, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } } } } }, select: { title: true, category: { select: { name: true } } }, take: 50, orderBy: { title: "asc" } });
-    return { suggestions: records.filter((record) => !isBlockedProduct(record.title, record.category.name)).slice(0, 8).map((record) => record.title) };
+    const normalized = query.trim();
+    return this.cached(CacheService.key("market:suggestions", normalized), 30, async () => {
+      const records = await this.prisma.canonicalProduct.findMany({ where: { ...publicProductWhere, title: normalized ? { contains: normalized, mode: "insensitive" } : undefined, offers: { some: { active: true, price: { gt: 0 }, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } } } } }, select: { title: true, category: { select: { name: true } } }, take: 50, orderBy: { title: "asc" } });
+      return { suggestions: records.filter((record) => !isBlockedProduct(record.title, record.category.name)).slice(0, 8).map((record) => record.title) };
+    });
   }
 
   async addOfferFeedback(offerId: string, body: unknown, clientKey: string) {
@@ -313,8 +464,14 @@ export class MarketService {
   async addFeedback(body: unknown) { const data = feedbackSchema.parse(body); const ticket = randomTicket(); await this.prisma.feedback.create({ data: { ticket, contact: data.contact, message: data.message } }); return { accepted: true, ticket }; }
   async follow(shopId: string) { if (!await this.prisma.shop.findFirst({ where: { id: shopId, status: ShopStatus.ACTIVE, publishedAt: { not: null } } })) throw new NotFoundException("Shop not found"); return { following: true }; }
   async listings(type: "gateway" | "project") {
+    const now = new Date();
     const records = await this.prisma.managedListing.findMany({
-      where: { type: type === "gateway" ? ManagedListingType.GATEWAY : ManagedListingType.PROJECT, active: true },
+      where: {
+        type: type === "gateway" ? ManagedListingType.GATEWAY : ManagedListingType.PROJECT,
+        active: true,
+        ...(type === "gateway" ? { gatewayPlacement: true } : {}),
+        ...(type === "gateway" ? { OR: [{ sponsorAd: { is: null } }, { campaigns: { some: { slotKey: "gateway", status: SponsorPlacementCampaignStatus.RUNNING, startsAt: { lte: now }, endsAt: { gt: now } } } }] } : {}),
+      },
       include: type === "gateway" ? { probeConfig: { include: { models: { where: { enabled: true }, select: { status: true, lastCheckedAt: true } } } } } : undefined,
       orderBy: [{ position: "asc" }, { createdAt: "desc" }],
     });
@@ -328,19 +485,57 @@ export class MarketService {
         type,
         ...(type === "gateway" ? { probe } : {}),
         thumbnailUrl: thumbnailObjectKey ? `/api/v1/assets/listings/${item.id}?v=${item.updatedAt.getTime()}` : item.thumbnailUrl,
+        homeSideSlot: item.homeSideSlot === "LEFT" ? "left" as const : item.homeSideSlot === "RIGHT" ? "right" as const : null,
         createdAt: item.createdAt.toISOString(),
         updatedAt: item.updatedAt.toISOString(),
       };
     });
   }
 
+  async homeSponsors() {
+    const now = new Date();
+    const records = await this.prisma.managedListing.findMany({
+      where: {
+        type: ManagedListingType.GATEWAY,
+        active: true,
+        OR: [{ homeSideSlot: { not: null } }, { homeBottomPlacement: true }],
+        AND: [{ OR: [
+          { sponsorAd: { is: null } },
+          { campaigns: { some: { slotKey: { in: ["home_left", "home_right", "home_bottom"] }, status: SponsorPlacementCampaignStatus.RUNNING, startsAt: { lte: now }, endsAt: { gt: now } } } },
+        ] }],
+      },
+      include: { probeConfig: { include: { models: { where: { enabled: true }, select: { status: true, lastCheckedAt: true } } } }, campaigns: { where: { status: SponsorPlacementCampaignStatus.RUNNING, startsAt: { lte: now }, endsAt: { gt: now } }, select: { slotKey: true } }, sponsorAd: { select: { id: true } } },
+      orderBy: [{ position: "asc" }, { createdAt: "desc" }],
+    });
+    return records.flatMap((item) => {
+      const record = item as typeof item & { probeConfig?: { enabled: boolean; lastInferenceAt: Date | null; models: Array<{ status: string; lastCheckedAt: Date | null }> } | null };
+      const { thumbnailObjectKey, probeConfig: _probeConfig, campaigns = [], sponsorAd = null, ...listing } = record as typeof record & { campaigns?: Array<{ slotKey: string }>; sponsorAd?: { id: string } | null };
+      const paidCampaigns = new Set(campaigns.map((campaign) => campaign.slotKey));
+      const base = {
+        ...listing,
+        type: "gateway" as const,
+        probe: summarizeListingProbe(record.probeConfig),
+        thumbnailUrl: thumbnailObjectKey ? `/api/v1/assets/listings/${item.id}?v=${item.updatedAt.getTime()}` : item.thumbnailUrl,
+        homeSideSlot: sponsorAd ? (paidCampaigns.has("home_left") ? "left" as const : paidCampaigns.has("home_right") ? "right" as const : null) : item.homeSideSlot === "LEFT" ? "left" as const : item.homeSideSlot === "RIGHT" ? "right" as const : null,
+        homeBottomPlacement: sponsorAd ? paidCampaigns.has("home_bottom") : item.homeBottomPlacement,
+        createdAt: item.createdAt.toISOString(),
+        updatedAt: item.updatedAt.toISOString(),
+      };
+      return sponsorAd && paidCampaigns.has("home_left") && paidCampaigns.has("home_right")
+        ? [base, { ...base, homeSideSlot: "right" as const, homeBottomPlacement: false }]
+        : [base];
+    });
+  }
+
   async managedGatewayListing(id: string) {
-    const item = await this.prisma.managedListing.findFirst({ where: { id, type: ManagedListingType.GATEWAY, active: true } });
+    const now = new Date();
+    const item = await this.prisma.managedListing.findFirst({ where: { id, type: ManagedListingType.GATEWAY, active: true, OR: [{ sponsorAd: { is: null } }, { campaigns: { some: { status: SponsorPlacementCampaignStatus.RUNNING, startsAt: { lte: now }, endsAt: { gt: now } } } }] } });
     if (!item) throw new NotFoundException("Sponsor not found");
     const { thumbnailObjectKey, ...listing } = item;
     return {
       ...listing,
       type: "gateway" as const,
+      homeSideSlot: item.homeSideSlot === "LEFT" ? "left" as const : item.homeSideSlot === "RIGHT" ? "right" as const : null,
       thumbnailUrl: thumbnailObjectKey ? `/api/v1/assets/listings/${item.id}?v=${item.updatedAt.getTime()}` : item.thumbnailUrl,
       createdAt: item.createdAt.toISOString(),
       updatedAt: item.updatedAt.toISOString(),
@@ -358,6 +553,24 @@ export class MarketService {
     return target;
   }
 
+  async shopSponsorTarget(id: string) {
+    const now = new Date();
+    const campaign = await this.prisma.sponsorPlacementCampaign.findFirst({
+      where: {
+        status: SponsorPlacementCampaignStatus.RUNNING,
+        startsAt: { lte: now },
+        endsAt: { gt: now },
+        order: { status: SponsorPlacementOrderStatus.APPROVED, sponsorAd: { id, kind: SponsorAdKind.SHOP, status: "APPROVED" } },
+        orderItem: { slotConfig: { kind: SponsorPlacementSlotKind.SHOP, enabled: true } },
+      },
+      include: { order: { include: { sponsorAd: true } } },
+    });
+    if (!campaign) throw new NotFoundException("Shop sponsor not found");
+    const target = safeApprovedUrl(campaign.order.sponsorAd.url);
+    await this.prisma.outboundClick.create({ data: { targetType: "shop_sponsor", targetId: id, destinationHost: new URL(target).hostname } });
+    return target;
+  }
+
   async offerTarget(id: string) {
     const offer = await this.prisma.offer.findFirst({
       where: { id, active: true, price: { gt: 0 }, canonicalProduct: { is: publicProductWhere }, shop: { status: ShopStatus.ACTIVE, publishedAt: { not: null } } },
@@ -369,7 +582,8 @@ export class MarketService {
     return target;
   }
   async listingTarget(id: string) {
-    const listing = await this.prisma.managedListing.findFirst({ where: { id, active: true } });
+    const now = new Date();
+    const listing = await this.prisma.managedListing.findFirst({ where: { id, active: true, OR: [{ sponsorAd: { is: null } }, { campaigns: { some: { status: SponsorPlacementCampaignStatus.RUNNING, startsAt: { lte: now }, endsAt: { gt: now } } } }] } });
     if (!listing) throw new NotFoundException("Listing not found");
     const target = safeApprovedUrl(listing.url);
     await this.prisma.outboundClick.create({ data: { targetType: "listing", targetId: listing.id, destinationHost: new URL(target).hostname } });

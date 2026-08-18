@@ -5,10 +5,11 @@ import { MarketService } from "./market.service";
 import { GatewayDirectoryService } from "./gateway-directory.service";
 import { GatewayProbeService } from "./gateway-probe.service";
 import { SubmissionService } from "./submission.service";
+import { CacheService } from "./cache.service";
 
 @Controller()
 export class MarketController {
-  constructor(private readonly market: MarketService, private readonly gatewayDirectory: GatewayDirectoryService, private readonly gatewayProbe: GatewayProbeService, private readonly submissions: SubmissionService) {}
+  constructor(private readonly market: MarketService, private readonly gatewayDirectory: GatewayDirectoryService, private readonly gatewayProbe: GatewayProbeService, private readonly submissions: SubmissionService, private readonly cache: CacheService) {}
   @Get("health") health() { return { status: "ok", service: "ai-card-api", time: new Date().toISOString() }; }
   @Get("stats") stats() { return this.market.stats(); }
   @Get("categories") categories() { return this.market.categories(); }
@@ -26,14 +27,14 @@ export class MarketController {
     return { listing, availability };
   }
   @Get("projects") projects() { return this.market.listings("project"); }
-  @Get("shops") shops(@Query() query: Record<string, unknown>) { return this.wrap(() => this.market.shops(query)); }
+  @Get("shops") async shops(@Query() query: Record<string, unknown>, @Req() request: Request) { await this.protectSearch(request, "shops"); return this.wrap(() => this.market.shops(query)); }
   @Get("shops/:slug") shop(@Param("slug") slug: string, @Query() query: Record<string, unknown>) { return this.wrap(() => this.market.shop(slug, query)); }
   @Get("products/:slug") product(@Param("slug") slug: string) { return this.market.product(slug); }
   @Get("activity") activity() { return this.market.activity(); }
   @Get("home") home() { return this.market.home(); }
   @Get("search/hot") async hotSearches() { return { hotSearches: await this.market.hotSearches() }; }
-  @Get("offers") offers(@Query() query: Record<string, unknown>) { return this.wrap(() => this.market.offers(query)); }
-  @Get("search/suggestions") suggestions(@Query("q") query = "") { return this.market.suggestions(query); }
+  @Get("offers") async offers(@Query() query: Record<string, unknown>, @Req() request: Request) { await this.protectSearch(request, "offers"); return this.wrap(() => this.market.offers(query)); }
+  @Get("search/suggestions") async suggestions(@Query("q") query = "", @Req() request: Request) { await this.protectSearch(request, "suggestions"); return this.market.suggestions(query); }
   @Post("feedback/offers/:offerId") async offerFeedback(@Param("offerId") offerId: string, @Body() body: unknown, @Req() request: Request) {
     const clientKey = request.ip || request.socket.remoteAddress || "anonymous";
     const result = await this.wrap(() => this.market.addOfferFeedback(offerId, body, clientKey));
@@ -41,7 +42,7 @@ export class MarketController {
     return result;
   }
   @Get("demands") demands() { return this.market.listDemands(); }
-  @Get("search") search(@Query() query: Record<string, unknown>) { return this.wrap(() => this.market.search(query)); }
+  @Get("search") async search(@Query() query: Record<string, unknown>, @Req() request: Request) { await this.protectSearch(request, "search"); return this.wrap(() => this.market.search(query)); }
   @Post("submissions") submit(@Body() body: unknown, @Req() request: Request) { return this.wrap(() => this.submissions.submit(body, request.ip || request.socket.remoteAddress || "unknown")); }
   @Post("demands") demand(@Body() body: unknown) { return this.wrap(() => this.market.demand(body)); }
   @Post("feedback") feedback(@Body() body: unknown) { return this.wrap(() => this.market.addFeedback(body)); }
@@ -55,11 +56,17 @@ export class MarketController {
     response.end();
   }
   @Get("go/shop/:id") async redirectShop(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.shopTarget(id)); }
+  @Get("go/shop-sponsor/:id") async redirectShopSponsor(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.shopSponsorTarget(id)); }
   @Get("go/offer/:id") async redirectOffer(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.offerTarget(id)); }
   @Get("go/listing/:id") async redirectListing(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.listingTarget(id)); }
   @Get("go/banner/:id") async redirectBanner(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.bannerTarget(id)); }
   @Get("go/side-ad/:slot") async redirectSideAd(@Param("slot") slot: string, @Res() response: Response) { return response.redirect(302, await this.market.sideAdTarget(slot)); }
   @Get("go/search-ad/:id") async redirectSearchAd(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.market.searchAdTarget(id)); }
   @Get("go/gateway/:id") async redirectGateway(@Param("id") id: string, @Res() response: Response) { return response.redirect(302, await this.gatewayDirectory.target(id)); }
+  private async protectSearch(request: Request, scope: string) {
+    const client = request.ip || request.socket.remoteAddress || "anonymous";
+    const result = await this.cache.consumeRateLimit(CacheService.key(`rate:${scope}`, client), Number(process.env.SEARCH_RATE_LIMIT || 120), 60);
+    if (!result.allowed) throw new HttpException({ message: "请求过于频繁，请稍后再试" }, HttpStatus.TOO_MANY_REQUESTS);
+  }
   private async wrap<T>(action: () => T | Promise<T>): Promise<T> { try { return await action(); } catch (error) { if (error instanceof ZodError) throw new BadRequestException(error.flatten()); throw error; } }
 }

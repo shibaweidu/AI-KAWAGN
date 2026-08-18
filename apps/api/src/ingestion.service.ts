@@ -1,10 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from "@nestjs/common";
-import { CandidateReviewStatus, CollectionMode, DataSourceKind, ManagedListingType, Prisma, ShopStatus, SyncStatus } from "@prisma/client";
+import { CandidateReviewStatus, CollectionMode, DataSourceKind, ManagedListingType, Prisma, ShopStatus, SideAdSlot, SyncStatus } from "@prisma/client";
 import { createHash, randomUUID } from "node:crypto";
 import { parse as parseCsv } from "csv-parse/sync";
 import { ZodError } from "zod";
 import { announcementSegmentSchema, authorizedShopSyncSchema, candidateDecisionSchema, importRowSchema, managedListingInputSchema, searchAdInputSchema, type AnnouncementSegment, type ImportRow } from "@ai-card/contracts";
-import { PriceAiFeedClient, TaokayouDirectoryClient, normalizeTitle, productFingerprint } from "@ai-card/crawler";
+import { CardnavCatalogClient, TaokayouDirectoryClient, normalizeTitle, productFingerprint, type PublicCatalogOffer, type PublicCatalogShop } from "@ai-card/crawler";
 import { ObjectStoreService } from "./object-store.service";
 import { PrismaService } from "./prisma.service";
 
@@ -15,7 +15,13 @@ const SOURCE_DEFINITIONS = [
     baseUrl: "https://pay.ldxp.cn", attributionUrl: `${DISCOVERY_211B_ORIGIN}/shops`,
     robotsUrl: null, termsUrl: null, pollIntervalSeconds: 6 * 60 * 60,
   },
+  {
+    key: "cardnav", name: "Cardnav 卡网大全", kind: DataSourceKind.PUBLIC_FEED,
+    baseUrl: "https://cardnav.xyz", attributionUrl: "https://cardnav.xyz/shops",
+    robotsUrl: "https://cardnav.xyz/robots.txt", termsUrl: null, pollIntervalSeconds: 6 * 60 * 60,
+  },
 ] as const;
+const SUPPORTED_SCHEDULE_SOURCE_KEYS = new Set<string>(SOURCE_DEFINITIONS.map((definition) => definition.key));
 
 const DEFAULT_HOT_SEARCHES = ["plus", "team", "pro", "k12", "cursor", "codex", "Claude", "kiro", "gemini", "邮箱", "接码"];
 const LDXP_MISSING_CONFIRMATIONS = 2;
@@ -56,7 +62,7 @@ class SourceRateLimitError extends Error {
 
 @Injectable()
 export class IngestionService implements OnModuleInit {
-  private readonly priceAi = new PriceAiFeedClient();
+  private readonly cardnav = new CardnavCatalogClient();
   private readonly taokayou = new TaokayouDirectoryClient();
   constructor(private readonly prisma: PrismaService, private readonly objects: ObjectStoreService) {}
   async onModuleInit() { await this.ensureSources(); await this.ensureHotSearches(); }
@@ -104,6 +110,7 @@ export class IngestionService implements OnModuleInit {
   async addManagedListing(input: unknown, thumbnail?: Express.Multer.File) {
     const data = parseManagedListingInput(input);
     const type = listingType(data.type);
+    const placement = await this.validateManagedListingPlacement(type, data);
     const latest = await this.prisma.managedListing.aggregate({ where: { type }, _max: { position: true } });
     const thumbnailObjectKey = thumbnail ? await this.storeManagedListingImage(thumbnail) : null;
     try {
@@ -112,6 +119,9 @@ export class IngestionService implements OnModuleInit {
           type, title: data.title, description: data.description, url: data.url,
           thumbnailUrl: thumbnailObjectKey ? null : data.thumbnailUrl, thumbnailObjectKey, badge: data.badge,
           modelTags: data.modelTags, pricingClaims: data.pricingClaims || null,
+          gatewayPlacement: placement.gatewayPlacement,
+          homeSideSlot: placement.homeSideSlot,
+          homeBottomPlacement: placement.homeBottomPlacement,
           position: (latest._max.position ?? -1) + 1,
         },
       });
@@ -127,6 +137,7 @@ export class IngestionService implements OnModuleInit {
     if (!current) throw new NotFoundException("展示项不存在");
     const data = parseManagedListingInput(input);
     if (listingType(data.type) !== current.type) throw new BadRequestException("展示类型不能修改");
+    const placement = await this.validateManagedListingPlacement(current.type, data, id);
 
     let thumbnailUrl = current.thumbnailUrl;
     let thumbnailObjectKey = current.thumbnailObjectKey;
@@ -147,7 +158,13 @@ export class IngestionService implements OnModuleInit {
     try {
       item = await this.prisma.managedListing.update({
         where: { id },
-        data: { title: data.title, description: data.description, url: data.url, badge: data.badge, modelTags: data.modelTags, pricingClaims: data.pricingClaims || null, thumbnailUrl, thumbnailObjectKey },
+        data: {
+          title: data.title, description: data.description, url: data.url, badge: data.badge,
+          modelTags: data.modelTags, pricingClaims: data.pricingClaims || null, thumbnailUrl, thumbnailObjectKey,
+          gatewayPlacement: placement.gatewayPlacement,
+          homeSideSlot: placement.homeSideSlot,
+          homeBottomPlacement: placement.homeBottomPlacement,
+        },
       });
     } catch (error) {
       if (uploadedObjectKey) await this.objects.remove(uploadedObjectKey).catch(() => undefined);
@@ -162,6 +179,9 @@ export class IngestionService implements OnModuleInit {
   async toggleManagedListing(id: string) {
     const item = await this.prisma.managedListing.findUnique({ where: { id } });
     if (!item) throw new NotFoundException("展示项不存在");
+    if (!item.active && item.homeSideSlot) {
+      await this.ensureHomeSideSlotAvailable(item.homeSideSlot, id);
+    }
     return this.toManagedListing(await this.prisma.managedListing.update({ where: { id }, data: { active: !item.active } }));
   }
 
@@ -185,10 +205,32 @@ export class IngestionService implements OnModuleInit {
     return {
       ...listing,
       type: item.type === ManagedListingType.GATEWAY ? "gateway" as const : "project" as const,
+      homeSideSlot: item.homeSideSlot === SideAdSlot.LEFT ? "left" as const : item.homeSideSlot === SideAdSlot.RIGHT ? "right" as const : null,
       thumbnailUrl: thumbnailObjectKey ? `/api/v1/assets/listings/${item.id}?v=${item.updatedAt.getTime()}` : item.thumbnailUrl,
       createdAt: item.createdAt.toISOString(),
       updatedAt: item.updatedAt.toISOString(),
     };
+  }
+
+  private async validateManagedListingPlacement(type: ManagedListingType, data: ReturnType<typeof parseManagedListingInput>, currentId?: string) {
+    if (type !== ManagedListingType.GATEWAY && (data.gatewayPlacement || data.homeSideSlot || data.homeBottomPlacement)) {
+      throw new BadRequestException("只有中转站赞助位可以投放到中转站目录或首页");
+    }
+    const homeSideSlot = type === ManagedListingType.GATEWAY ? toPrismaSideAdSlot(data.homeSideSlot) : null;
+    if (homeSideSlot) await this.ensureHomeSideSlotAvailable(homeSideSlot, currentId);
+    return {
+      gatewayPlacement: type === ManagedListingType.GATEWAY && data.gatewayPlacement,
+      homeSideSlot,
+      homeBottomPlacement: type === ManagedListingType.GATEWAY && data.homeBottomPlacement,
+    };
+  }
+
+  private async ensureHomeSideSlotAvailable(slot: SideAdSlot, currentId?: string) {
+    const conflict = await this.prisma.managedListing.findFirst({
+      where: { type: ManagedListingType.GATEWAY, active: true, homeSideSlot: slot, ...(currentId ? { id: { not: currentId } } : {}) },
+      select: { title: true },
+    });
+    if (conflict) throw new BadRequestException(`首页${slot === SideAdSlot.LEFT ? "左侧" : "右侧"}赞助位已被“${conflict.title}”占用`);
   }
 
   private async storeManagedListingImage(file: Express.Multer.File) {
@@ -362,13 +404,13 @@ export class IngestionService implements OnModuleInit {
         update: { name: definition.name, kind: definition.kind, baseUrl: definition.baseUrl, attributionUrl: definition.attributionUrl, robotsUrl: definition.robotsUrl, termsUrl: definition.termsUrl },
       });
     }
-    const sources = await this.prisma.dataSource.findMany({ where: { key: "ldxp" }, orderBy: { name: "asc" } });
+    const sources = await this.prisma.dataSource.findMany({ where: { key: { in: SOURCE_DEFINITIONS.map((definition) => definition.key) } }, orderBy: { name: "asc" } });
     return sources.map(sourceScheduleView);
   }
 
   async setSourceSchedule(key: string, input: unknown) {
-    if (key !== "ldxp") throw new BadRequestException("仅支持设置链动小店采集计划");
-    const { enabled, intervalMinutes } = parseLdxpSchedule(input);
+    if (!SUPPORTED_SCHEDULE_SOURCE_KEYS.has(key)) throw new BadRequestException("不支持设置该采集来源");
+    const { enabled, intervalMinutes } = parseSourceSchedule(input, key === "ldxp" ? 10 : 60);
     const source = await this.prisma.dataSource.update({
       where: { key },
       data: { enabled, pollIntervalSeconds: intervalMinutes * 60 },
@@ -377,17 +419,51 @@ export class IngestionService implements OnModuleInit {
   }
 
   async requestSourceSync(key: string) {
-    if (key !== "ldxp") throw new BadRequestException("仅支持同步链动小店数据");
+    if (!SUPPORTED_SCHEDULE_SOURCE_KEYS.has(key)) throw new BadRequestException("不支持同步该采集来源");
     const source = await this.source(key);
+    const syncKind = `${key}-sync-request`;
     const existing = await this.prisma.ingestionRun.findFirst({
-      where: { dataSourceId: source.id, kind: "ldxp-sync-request", status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } },
+      where: { dataSourceId: source.id, kind: syncKind, status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } },
       orderBy: { createdAt: "desc" },
     });
     if (existing) return { accepted: true, queued: existing.status === SyncStatus.QUEUED, runId: existing.id };
     const run = await this.prisma.ingestionRun.create({
-      data: { dataSourceId: source.id, kind: "ldxp-sync-request", status: SyncStatus.QUEUED },
+      data: { dataSourceId: source.id, kind: syncKind, status: SyncStatus.QUEUED },
     });
     return { accepted: true, queued: true, runId: run.id };
+  }
+
+  async syncPublicCatalog(key: string, requestedRunId?: string) {
+    if (key !== "cardnav") throw new BadRequestException("仅支持 Cardnav 公开目录");
+    const source = await this.source(key);
+    const run = requestedRunId
+      ? await this.prisma.ingestionRun.findFirst({ where: { id: requestedRunId, dataSourceId: source.id, kind: { in: [`${key}-sync-request`, `${key}-scheduled-sync`] } } })
+      : null;
+    const activeRun = run || await this.startRun(source.id, `${key}-catalog-sync`);
+    if (activeRun.status === SyncStatus.SUCCEEDED || activeRun.status === SyncStatus.FAILED) return { runId: activeRun.id, status: activeRun.status, counts: activeRun.counts };
+    await this.prisma.ingestionRun.update({ where: { id: activeRun.id }, data: { status: SyncStatus.RUNNING, startedAt: activeRun.startedAt || new Date(), finishedAt: null, errorCode: null, errorMessage: null } });
+    try {
+      const snapshot = await this.cardnav.fetchSnapshot({ etag: source.etag, lastModified: source.lastModified });
+      if ("notModified" in snapshot) {
+        const finishedAt = new Date();
+        await this.prisma.$transaction([
+          this.prisma.dataSource.update({ where: { id: source.id }, data: { lastCheckedAt: finishedAt, etag: snapshot.etag || source.etag, lastModified: snapshot.lastModified || source.lastModified } }),
+          this.prisma.ingestionRun.update({ where: { id: activeRun.id }, data: { status: SyncStatus.SUCCEEDED, counts: { noChange: true }, finishedAt } }),
+        ]);
+        return { runId: activeRun.id, noChange: true };
+      }
+      const rawSnapshotKey = await this.objects.put(`raw/${key}/catalog-${snapshot.snapshotId}.json`, snapshot.raw, "application/json");
+      const result = await this.persistPublicCatalog(source, activeRun.id, snapshot);
+      const finishedAt = new Date();
+      await this.prisma.$transaction([
+        this.prisma.dataSource.update({ where: { id: source.id }, data: { lastCheckedAt: finishedAt, lastSuccessAt: finishedAt, lastSnapshotId: snapshot.snapshotId, etag: snapshot.etag, lastModified: snapshot.lastModified } }),
+        this.prisma.ingestionRun.update({ where: { id: activeRun.id }, data: { status: SyncStatus.SUCCEEDED, snapshotId: snapshot.snapshotId, checksum: sha256(snapshot.raw), rawSnapshotKey, counts: result, finishedAt } }),
+      ]);
+      return { runId: activeRun.id, ...result };
+    } catch (error) {
+      await this.failRun(activeRun.id, error);
+      throw error;
+    }
   }
 
   async ldxpProductBackfillStatus(key: string) {
@@ -462,8 +538,9 @@ export class IngestionService implements OnModuleInit {
     const pass = Math.max(1, numberValue(counts.pass));
     const lastCandidateId = typeof counts.lastCandidateId === "string" ? counts.lastCandidateId : null;
     const refreshStartedAt = run.startedAt || run.createdAt;
+    const refreshAfterMs = run.dataSource.pollIntervalSeconds * 1000;
     const candidates = await this.ldxpBackfillCandidates(run.dataSourceId);
-    const needsSync = (candidate: LdxpBackfillCandidate) => isLdxpProductSyncDue(candidate.rawMetadata, refreshAll, refreshStartedAt);
+    const needsSync = (candidate: LdxpBackfillCandidate) => isLdxpProductSyncDue(candidate.rawMetadata, refreshAll, refreshStartedAt, refreshAfterMs);
     const pending = candidates.filter(needsSync);
     const prioritized = priorityTokens
       .map((token) => pending.find((candidate) => candidate.token === token))
@@ -892,83 +969,103 @@ export class IngestionService implements OnModuleInit {
     });
   }
 
-  async syncPriceAi() {
-    const source = await this.source("priceai");
-    const run = await this.startRun(source.id, "priceai-feed");
-    try {
-      const pointerResult = await this.priceAi.fetchPointer({ etag: source.etag, lastModified: source.lastModified });
-      if (pointerResult.notModified || pointerResult.pointer?.snapshot_id === source.lastSnapshotId) {
-        await this.prisma.$transaction([
-          this.prisma.dataSource.update({ where: { id: source.id }, data: { lastCheckedAt: new Date(), etag: pointerResult.etag || source.etag, lastModified: pointerResult.lastModified || source.lastModified } }),
-          this.prisma.ingestionRun.update({ where: { id: run.id }, data: { status: SyncStatus.SUCCEEDED, counts: { noChange: true }, finishedAt: new Date() } }),
-        ]);
-        return { runId: run.id, noChange: true };
-      }
-      const pointer = pointerResult.pointer!;
-      const { snapshot, raw } = await this.priceAi.fetchSnapshot(pointer);
-      const checksum = sha256(raw);
-      const rawSnapshotKey = await this.objects.put(`raw/priceai/${snapshot.snapshot_id}.json`, raw, "application/json");
-      const seenOfferIds: string[] = [];
-      const seenShopIds = new Set<string>();
-      let skippedInsecureOffers = 0;
+  private async persistPublicCatalog(source: { id: string; key: string; name: string; attributionUrl: string }, runId: string, snapshot: { generatedAt: string; shops: PublicCatalogShop[]; offers: PublicCatalogOffer[]; rejectedShops: number; rejectedOffers: number }) {
+    const shopUrls = [...new Set(snapshot.shops.map((shop) => normalizeCatalogUrl(shop.shopUrl)).filter(Boolean))];
+    const publishedShops = await this.prisma.shop.findMany({ where: { homepageUrl: { in: shopUrls } }, select: { id: true, homepageUrl: true } });
+    const publishedByUrl = new Map(publishedShops.map((shop) => [normalizeCatalogUrl(shop.homepageUrl), shop.id]));
+    const existingCandidates = await this.prisma.shopCandidate.findMany({ where: { dataSourceId: source.id }, select: { id: true, externalId: true, homepageUrl: true, approvedShopId: true, reviewStatus: true } });
+    const existingByExternalId = new Map(existingCandidates.map((candidate) => [candidate.externalId, candidate]));
+    const offersByShop = new Map<string, PublicCatalogOffer[]>();
+    for (const offer of snapshot.offers) offersByShop.set(offer.shopExternalId, [...(offersByShop.get(offer.shopExternalId) || []), offer]);
+    const seenCandidateIds = new Set<string>();
+    let createdShops = 0;
+    let updatedShops = 0;
+    let duplicateShops = 0;
+    let productsUpserted = 0;
+    let offersPromoted = 0;
+    let duplicateOffers = 0;
+    let offersDeactivated = 0;
 
-      for (const product of snapshot.products) {
-        for (const offer of product.top_offers) {
-          if (!offer.url.startsWith("https://")) {
-            skippedInsecureOffers += 1;
-            continue;
-          }
-          const externalShopId = offer.source_id || `name-${sha256(offer.source_name).slice(0, 16)}`;
-          const name = offer.source_store_name || offer.source_name;
-          const offerUrl = new URL(offer.url);
-          const candidate = await this.prisma.shopCandidate.upsert({
-            where: { dataSourceId_externalId: { dataSourceId: source.id, externalId: externalShopId } },
-            create: {
-              dataSourceId: source.id, externalId: externalShopId, name,
-              directoryUrl: source.attributionUrl, homepageUrl: offerUrl.origin,
-              lastSeenAt: new Date(), rawMetadata: { sourceName: offer.source_name },
-            },
-            update: { name, homepageUrl: offerUrl.origin, lastSeenAt: new Date(), missingCount: 0, rawMetadata: { sourceName: offer.source_name } },
+    for (const shop of snapshot.shops) {
+      const shopUrl = normalizeCatalogUrl(shop.shopUrl);
+      if (!shopUrl) continue;
+      const approvedShopId = publishedByUrl.get(shopUrl) || existingByExternalId.get(shop.externalId)?.approvedShopId || null;
+      const previous = existingByExternalId.get(shop.externalId);
+      const offers = offersByShop.get(shop.externalId) || [];
+      const seenOfferIds = [...new Set(offers.map((offer) => offer.externalId))];
+      const candidate = await this.prisma.$transaction(async (tx) => {
+        const candidate = await tx.shopCandidate.upsert({
+          where: { dataSourceId_externalId: { dataSourceId: source.id, externalId: shop.externalId } },
+          create: {
+            dataSourceId: source.id, externalId: shop.externalId, name: shop.name, directoryUrl: source.attributionUrl,
+            homepageUrl: shopUrl, sourceSyncedAt: new Date(shop.observedAt), lastSeenAt: new Date(shop.observedAt),
+            approvedShopId, reviewStatus: approvedShopId ? CandidateReviewStatus.MERGED : CandidateReviewStatus.PENDING,
+            rawMetadata: { ...shop.rawMetadata, catalogSource: source.key, normalizedShopUrl: shopUrl, observedAt: shop.observedAt },
+          },
+          update: {
+            name: shop.name, directoryUrl: source.attributionUrl, homepageUrl: shopUrl, sourceSyncedAt: new Date(shop.observedAt),
+            lastSeenAt: new Date(shop.observedAt), missingCount: 0, rawMetadata: { ...shop.rawMetadata, catalogSource: source.key, normalizedShopUrl: shopUrl, observedAt: shop.observedAt },
+            ...(approvedShopId ? { approvedShopId, reviewStatus: CandidateReviewStatus.MERGED } : {}),
+          },
+        });
+        if (approvedShopId) {
+          await tx.shopSource.upsert({
+            where: { dataSourceId_externalId: { dataSourceId: source.id, externalId: shop.externalId } },
+            create: { shopId: approvedShopId, dataSourceId: source.id, externalId: shop.externalId, collectionMode: CollectionMode.PUBLIC_FEED, attributionLabel: source.name },
+            update: { shopId: approvedShopId, collectionMode: CollectionMode.PUBLIC_FEED, attributionLabel: source.name },
           });
-          seenShopIds.add(candidate.id);
-          seenOfferIds.push(offer.id);
-          await this.prisma.offerCandidate.upsert({
-            where: { dataSourceId_externalId: { dataSourceId: source.id, externalId: offer.id } },
+        }
+        for (const offer of offers) {
+          await tx.offerCandidate.upsert({
+            where: { dataSourceId_externalId: { dataSourceId: source.id, externalId: offer.externalId } },
             create: {
-              dataSourceId: source.id, externalId: offer.id, shopCandidateId: candidate.id,
-              externalProductId: product.id, productName: product.name, specification: product.spec || product.product_type,
-              category: product.platform || product.product_type, price: offer.price, currency: offer.currency.toUpperCase(),
-              stock: normalizeFeedStatus(offer.status) === "out_of_stock" ? 0 : null, stockStatus: normalizeFeedStatus(offer.status), offerUrl: offer.url,
-              observedAt: new Date(product.snapshot_generated_at), ingestionRunId: run.id,
-              rawMetadata: { productSlug: product.slug, originalTitle: offer.title },
+              dataSourceId: source.id, externalId: offer.externalId, shopCandidateId: candidate.id,
+              externalProductId: offer.externalProductId, productName: offer.productName, specification: offer.specification,
+              category: offer.category, price: offer.price, currency: offer.currency, stock: offer.stock, stockStatus: offer.stockStatus,
+              offerUrl: offer.offerUrl, sourceAttributionUrl: source.attributionUrl, observedAt: new Date(offer.observedAt), ingestionRunId: runId,
+              rawMetadata: { ...offer.rawMetadata, catalogSource: source.key, shopUrl },
             },
             update: {
-              shopCandidateId: candidate.id, productName: product.name, specification: product.spec || product.product_type,
-              category: product.platform || product.product_type, price: offer.price, currency: offer.currency.toUpperCase(),
-              stock: normalizeFeedStatus(offer.status) === "out_of_stock" ? 0 : null,
-              stockStatus: normalizeFeedStatus(offer.status), offerUrl: offer.url, observedAt: new Date(product.snapshot_generated_at),
-              ingestionRunId: run.id, active: true, missingCount: 0,
-              rawMetadata: { productSlug: product.slug, originalTitle: offer.title },
+              shopCandidateId: candidate.id, externalProductId: offer.externalProductId, productName: offer.productName, specification: offer.specification,
+              category: offer.category, price: offer.price, currency: offer.currency, stock: offer.stock, stockStatus: offer.stockStatus,
+              offerUrl: offer.offerUrl, sourceAttributionUrl: source.attributionUrl, observedAt: new Date(offer.observedAt), ingestionRunId: runId,
+              active: true, missingCount: 0, rawMetadata: { ...offer.rawMetadata, catalogSource: source.key, shopUrl },
             },
           });
         }
+        await tx.offerCandidate.updateMany({ where: { shopCandidateId: candidate.id, active: true, externalId: { notIn: seenOfferIds } }, data: { missingCount: { increment: 1 } } });
+        const staleOffers = await tx.offerCandidate.findMany({ where: { shopCandidateId: candidate.id, active: true, missingCount: { gte: 2 } }, select: { id: true, externalId: true } });
+        if (staleOffers.length) await tx.offerCandidate.updateMany({ where: { id: { in: staleOffers.map((offer) => offer.id) } }, data: { active: false } });
+        if (approvedShopId) {
+          const activeCandidates = await tx.offerCandidate.findMany({ where: { shopCandidateId: candidate.id, active: true } });
+          for (const offerCandidate of activeCandidates) await this.promoteOffer(tx, runId, approvedShopId, source, offerCandidate);
+          if (staleOffers.length) {
+            const stalePublished = await tx.offer.findMany({ where: { shopId: approvedShopId, dataSourceId: source.id, externalId: { in: staleOffers.map((offer) => offer.externalId) }, active: true }, select: { id: true, canonicalProductId: true } });
+            if (stalePublished.length) {
+              await tx.offer.updateMany({ where: { id: { in: stalePublished.map((offer) => offer.id) } }, data: { active: false, syncedAt: new Date(snapshot.generatedAt) } });
+              for (const offer of stalePublished) await tx.outboxEvent.create({ data: { topic: "offer.updated", aggregateId: offer.id, payload: { offerId: offer.id, productId: offer.canonicalProductId, active: false, reason: "missing_from_two_public_catalog_snapshots" } } });
+            }
+            offersDeactivated += stalePublished.length;
+          }
+          await tx.shop.update({ where: { id: approvedShopId }, data: { lastSyncedAt: new Date(snapshot.generatedAt) } });
+        }
+        return candidate;
+      }, { timeout: 60_000 });
+      existingByExternalId.set(shop.externalId, { ...candidate, homepageUrl: shopUrl, approvedShopId: candidate.approvedShopId, reviewStatus: candidate.reviewStatus });
+      seenCandidateIds.add(candidate.id);
+      if (previous) updatedShops += 1; else createdShops += 1;
+      if (publishedByUrl.has(shopUrl) && previous?.approvedShopId !== approvedShopId) duplicateShops += 1;
+      if (approvedShopId) {
+        offersPromoted += offers.length;
       }
-
-      await this.prisma.offerCandidate.updateMany({
-        where: { dataSourceId: source.id, externalId: { notIn: seenOfferIds }, active: true },
-        data: { missingCount: { increment: 1 } },
-      });
-      await this.prisma.offerCandidate.updateMany({ where: { dataSourceId: source.id, missingCount: { gte: 2 } }, data: { active: false } });
-      const counts = { products: snapshot.products.length, offers: seenOfferIds.length, shops: seenShopIds.size, skippedInsecureOffers, stale: snapshot.stale };
-      await this.prisma.$transaction([
-        this.prisma.dataSource.update({ where: { id: source.id }, data: { etag: pointerResult.etag, lastModified: pointerResult.lastModified, lastSnapshotId: snapshot.snapshot_id, lastCheckedAt: new Date(), lastSuccessAt: new Date() } }),
-        this.prisma.ingestionRun.update({ where: { id: run.id }, data: { status: SyncStatus.SUCCEEDED, snapshotId: snapshot.snapshot_id, checksum, rawSnapshotKey, counts, finishedAt: new Date() } }),
-      ]);
-      return { runId: run.id, ...counts };
-    } catch (error) {
-      await this.failRun(run.id, error);
-      throw error;
+      productsUpserted += offers.length;
     }
+
+    const missingCandidates = await this.prisma.shopCandidate.findMany({ where: { dataSourceId: source.id, id: { notIn: [...seenCandidateIds] }, reviewStatus: CandidateReviewStatus.PENDING }, select: { id: true } });
+    if (missingCandidates.length) await this.prisma.shopCandidate.updateMany({ where: { id: { in: missingCandidates.map((candidate) => candidate.id) } }, data: { missingCount: { increment: 1 } } });
+    const dedupedOfferUrls = new Set(snapshot.offers.map((offer) => normalizeCatalogUrl(offer.offerUrl)));
+    duplicateOffers = snapshot.offers.length - dedupedOfferUrls.size;
+    return { shops: snapshot.shops.length, createdShops, updatedShops, duplicateShops, products: productsUpserted, offers: snapshot.offers.length, duplicateOffers, offersPromoted, offersDeactivated, rejectedShops: snapshot.rejectedShops, rejectedOffers: snapshot.rejectedOffers };
   }
 
   async discoverTaokayou() {
@@ -1211,7 +1308,12 @@ export class IngestionService implements OnModuleInit {
           data: {
             slug: await uniqueShopSlug(tx, candidate.dataSource.key, candidate.externalId), name: candidate.name,
             description: "数据来自已审核的公开来源，交易与交付由原店负责。", logoUrl: candidate.logoUrl,
-            homepageUrl, adapterKind: candidate.dataSource.key === "priceai" ? "priceai-feed" : candidate.dataSource.key === "ldxp" ? "211b-public-directory" : "authorized-direct",
+            homepageUrl,
+            adapterKind: candidate.dataSource.key === "ldxp"
+              ? "211b-public-directory"
+              : candidate.dataSource.key === "cardnav"
+                ? "public-catalog"
+                : "authorized-direct",
             status: ShopStatus.ACTIVE, verifiedAt: new Date(), publishedAt: new Date(), lastSyncedAt: candidate.sourceSyncedAt, trustScore: 50,
           },
         });
@@ -1320,7 +1422,8 @@ export class IngestionService implements OnModuleInit {
 
   private async failRun(id: string, error: unknown) {
     const run = await this.prisma.ingestionRun.update({ where: { id }, data: { status: SyncStatus.FAILED, errorCode: error instanceof Error ? error.name : "UnknownError", errorMessage: String(error instanceof Error ? error.message : error).slice(0, 2000), finishedAt: new Date() }, include: { dataSource: true } });
-    if (!run.dataSource.enabled || !["priceai-feed", "taokayou-sitemap"].includes(run.kind)) return;
+    const isScheduledCatalogRun = ["taokayou-sitemap", "cardnav-sync-request", "cardnav-scheduled-sync", "cardnav-catalog-sync"].includes(run.kind);
+    if (!run.dataSource.enabled || !isScheduledCatalogRun) return;
     const recent = await this.prisma.ingestionRun.findMany({ where: { dataSourceId: run.dataSourceId, kind: run.kind }, orderBy: { createdAt: "desc" }, take: 3, select: { status: true } });
     if (recent.length < 3 || recent.some((item) => item.status !== SyncStatus.FAILED)) return;
     await this.prisma.$transaction(async (tx) => {
@@ -1366,6 +1469,14 @@ export class IngestionService implements OnModuleInit {
       create: { shopId, dataSourceId: source.id, sourceId: candidate.externalProductId, canonicalProductId: canonical.id, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), description: candidate.specification, thumbnailUrl, categoryHint: candidate.category, externalUrl: candidate.offerUrl, confidence: 1 },
       update: { canonicalProductId: canonical.id, title: candidate.productName, normalizedTitle: normalizeTitle(candidate.productName), description: candidate.specification, thumbnailUrl: thumbnailUrl || undefined, categoryHint: candidate.category, externalUrl: candidate.offerUrl, active: true },
     });
+    const sameUrlOffer = await tx.offer.findFirst({ where: { shopId, sourceUrl: normalizeCatalogUrl(candidate.offerUrl), NOT: { dataSourceId: source.id } }, orderBy: { syncedAt: "desc" } });
+    if (sameUrlOffer) {
+      const changed = !sameUrlOffer.price.equals(candidate.price) || sameUrlOffer.stock !== candidate.stock || !sameUrlOffer.active;
+      const updated = await tx.offer.update({ where: { id: sameUrlOffer.id }, data: { canonicalProductId: canonical.id, price: candidate.price, stock: candidate.stock, active: true, sourceObservedAt: candidate.observedAt, syncedAt: new Date() } });
+      if (changed) await tx.priceHistory.create({ data: { offerId: updated.id, price: candidate.price, stock: candidate.stock, capturedAt: candidate.observedAt } });
+      await tx.outboxEvent.create({ data: { topic: "offer.updated", aggregateId: updated.id, payload: { offerId: updated.id, productId: canonical.id, deduplicatedSource: source.key } } });
+      return updated;
+    }
     const existing = await tx.offer.findUnique({ where: { shopId_dataSourceId_externalId: { shopId, dataSourceId: source.id, externalId: candidate.externalId } } });
     const offer = await tx.offer.upsert({
       where: { shopId_dataSourceId_externalId: { shopId, dataSourceId: source.id, externalId: candidate.externalId } },
@@ -1404,12 +1515,16 @@ export function normalizeApprovedHomepageUrl(value: string) {
 }
 
 export function parseLdxpSchedule(input: unknown) {
+  return parseSourceSchedule(input, 10);
+}
+
+export function parseSourceSchedule(input: unknown, minimumMinutes = 30) {
   const body = input as { enabled?: unknown; intervalMinutes?: unknown };
   const enabled = body?.enabled;
   const intervalMinutes = Number(body?.intervalMinutes);
   if (typeof enabled !== "boolean") throw new BadRequestException("enabled 必须为布尔值");
-  if (!Number.isInteger(intervalMinutes) || intervalMinutes < 30 || intervalMinutes > 1440) {
-    throw new BadRequestException("采集间隔必须为 30-1440 分钟的整数");
+  if (!Number.isInteger(intervalMinutes) || intervalMinutes < minimumMinutes || intervalMinutes > 1440) {
+    throw new BadRequestException(`采集间隔必须为 ${minimumMinutes}-1440 分钟的整数`);
   }
   return { enabled, intervalMinutes };
 }
@@ -1440,11 +1555,12 @@ export function shouldDeactivateMissingLdxpOffer(missingCount: number) {
   return Number.isInteger(missingCount) && missingCount >= LDXP_MISSING_CONFIRMATIONS;
 }
 
-export function isLdxpProductSyncDue(metadata: Prisma.JsonValue | null, refreshAll: boolean, refreshStartedAt: Date) {
+export function isLdxpProductSyncDue(metadata: Prisma.JsonValue | null, refreshAll: boolean, refreshStartedAt: Date, refreshAfterMs: number | null = null) {
   if (isLdxpProductSyncPending(metadata)) return true;
-  if (!refreshAll) return false;
   const syncedAt = Date.parse(String((metadata as Record<string, unknown>).productSyncedAt));
-  return !Number.isFinite(syncedAt) || syncedAt < refreshStartedAt.getTime();
+  if (!Number.isFinite(syncedAt)) return true;
+  if (refreshAll) return syncedAt < refreshStartedAt.getTime();
+  return refreshAfterMs !== null && refreshAfterMs > 0 && refreshStartedAt.getTime() - syncedAt >= refreshAfterMs;
 }
 
 export function isLdxp211bCandidate(metadata: Prisma.JsonValue | null) {
@@ -1755,12 +1871,32 @@ function sourceScheduleView<T extends { enabled: boolean; pollIntervalSeconds: n
     : null;
   return { ...source, nextRunAt };
 }
-function normalizeFeedStatus(status: string) { return /out|sold|unavailable/i.test(status) ? "out_of_stock" : /low/i.test(status) ? "low_stock" : "in_stock"; }
-function sourceCollectionMode(sourceKey: string) { return sourceKey === "priceai" ? CollectionMode.PUBLIC_FEED : sourceKey === "ldxp" ? CollectionMode.PUBLIC_DIRECTORY : sourceKey === "taokayou" ? CollectionMode.AUTHORIZED_DIRECT : CollectionMode.MANUAL; }
+export function normalizeCatalogUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) return "";
+    if (/^(?:www\.|pay\.)?ldxp\.cn$/i.test(url.hostname)) url.hostname = "pay.ldxp.cn";
+    url.hash = "";
+    url.search = "";
+    return url.href.replace(/\/$/, "");
+  } catch { return ""; }
+}
+function sourceCollectionMode(sourceKey: string) {
+  if (sourceKey === "cardnav") return CollectionMode.PUBLIC_FEED;
+  if (sourceKey === "ldxp") return CollectionMode.PUBLIC_DIRECTORY;
+  if (sourceKey === "taokayou") return CollectionMode.AUTHORIZED_DIRECT;
+  return CollectionMode.MANUAL;
+}
 function listingType(value: unknown) {
   if (value === "gateway" || value === ManagedListingType.GATEWAY) return ManagedListingType.GATEWAY;
   if (value === "project" || value === ManagedListingType.PROJECT) return ManagedListingType.PROJECT;
   throw new BadRequestException("展示类型必须是 gateway 或 project");
+}
+
+function toPrismaSideAdSlot(value: "left" | "right" | undefined) {
+  if (value === "left") return SideAdSlot.LEFT;
+  if (value === "right") return SideAdSlot.RIGHT;
+  return null;
 }
 
 function parseManagedListingInput(input: unknown) {

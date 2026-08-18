@@ -48,5 +48,9 @@ fi
 
 "${compose[@]}" exec -T web node -e \
   "fetch('http://api:4000/v1/health').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log).catch(e=>{console.error(e);process.exit(1)})"
+if [[ "${REBUILD_SEARCH_INDEX:-0}" == "1" ]]; then
+  echo "Rebuilding Meilisearch offers and shops indexes..."
+  "${compose[@]}" exec -T worker node apps/worker/dist/rebuild-search-index.js
+fi
 "${compose[@]}" ps
 echo "Deployment completed."

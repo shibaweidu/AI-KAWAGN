@@ -25,6 +25,7 @@ import { getHome, getOffers, getSuggestions } from "@/lib/home-api";
 import { OfferFeedbackDialog } from "./OfferFeedbackDialog";
 import { MediaThumbnail } from "./MediaThumbnail";
 import { SearchAdCard } from "./SearchAdCard";
+import { GatewaySponsorCard, GatewaySponsorGrid } from "./GatewaySponsorGrid";
 
 const stockLabels: Record<StockStatus, string> = { in_stock: "有货", low_stock: "低库存", out_of_stock: "缺货" };
 const sortLabels: Record<OfferSort, string> = { price_asc: "价格从低到高", newest: "最近更新", stock_desc: "库存优先" };
@@ -147,7 +148,7 @@ export function HomeMarketplace() {
   return <div className="home-marketplace">
     {!home?.banner && <h1 className="visually-hidden">数字商品报价检索</h1>}
     <div className="home-side-layout">
-      <SideAdRail slot="left" ad={home?.sideAds.find((item) => item.slot === "left") || null} dismissed={dismissedSideAds.left} onDismiss={dismissSideAd} />
+      <SideAdRail slot="left" sponsor={home?.homeSponsors.find((item) => item.homeSideSlot === "left") || null} dismissed={dismissedSideAds.left} onDismiss={dismissSideAd} />
       <div className="home-main-column">
       <div className={`home-intro shell ${home?.banner ? "" : "without-banner"}`}>
       {home?.banner && <section className="home-banner-shell" aria-label="运营广告">
@@ -194,23 +195,20 @@ export function HomeMarketplace() {
         <Pagination page={offers.page} totalPages={offers.totalPages} onPage={(page) => navigate({ page }, false)} />
       </> : <div className="results-state"><MagnifyingGlass /><h3>暂无逐条商品报价</h3><p>当前已完成店铺目录收录，商品明细和同款报价将在授权同步后展示。</p><div className="empty-keywords">{home?.hotSearches.slice(0, 4).map((item) => <button key={item} type="button" onClick={() => chooseSuggestion(item)}>{item}</button>)}</div>{hasFilters && <button className="button dark" onClick={clearFilters}>清除筛选</button>}</div>}
       </section>
+      {home?.homeSponsors.some((item) => item.homeBottomPlacement) && <section className="home-bottom-sponsors shell" aria-labelledby="home-bottom-sponsors-title"><div className="home-section-heading"><div className="home-heading-inline"><span className="kicker"><Tag />合作推广</span><h2 id="home-bottom-sponsors-title">赞助商</h2></div><span className="result-summary">付费展示</span></div><GatewaySponsorGrid items={home.homeSponsors.filter((item) => item.homeBottomPlacement)} /></section>}
       </div>
-      <SideAdRail slot="right" ad={home?.sideAds.find((item) => item.slot === "right") || null} dismissed={dismissedSideAds.right} onDismiss={dismissSideAd} />
+      <SideAdRail slot="right" sponsor={home?.homeSponsors.find((item) => item.homeSideSlot === "right") || null} dismissed={dismissedSideAds.right} onDismiss={dismissSideAd} />
     </div>
   </div>;
 }
 
-function SideAdRail({ slot, ad, dismissed, onDismiss }: { slot: SideAdSlot; ad: HomeResponse["sideAds"][number] | null; dismissed: boolean; onDismiss: (slot: SideAdSlot) => void }) {
-  if (!ad || dismissed) return <aside className={`home-side-ad home-side-ad-${slot}`} aria-hidden="true" />;
+function SideAdRail({ slot, sponsor, dismissed, onDismiss }: { slot: SideAdSlot; sponsor: HomeResponse["homeSponsors"][number] | null; dismissed: boolean; onDismiss: (slot: SideAdSlot) => void }) {
+  if (!sponsor || dismissed) return <aside className={`home-side-ad home-side-ad-${slot}`} aria-hidden="true" />;
   const label = slot === "left" ? "左侧广告" : "右侧广告";
-  return <aside className={`home-side-ad home-side-ad-${slot}`} aria-label={`${ad.label}：${ad.title}`}>
+  return <aside className={`home-side-ad home-side-ad-${slot}`} aria-label={`赞助商：${sponsor.title}`}>
     <div className="home-side-ad-sticky">
       <button className="home-side-ad-close" type="button" aria-label={`关闭${label}`} title={`关闭${label}`} onClick={() => onDismiss(slot)}><X /></button>
-      <a href={`/api/v1/go/side-ad/${slot}`} target="_blank" rel="noreferrer sponsored" aria-label={`${ad.label}：${ad.title}`}>
-        <span className="home-side-ad-label">{ad.label}</span>
-        <img src={ad.imageUrl} alt={ad.title} loading="lazy" />
-        <strong>{ad.title}</strong>
-      </a>
+      <GatewaySponsorCard item={sponsor} />
     </div>
   </aside>;
 }

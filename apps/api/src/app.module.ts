@@ -16,6 +16,11 @@ import { SubmissionService } from "./submission.service";
 import { BotService } from "./bot.service";
 import { BotInternalController } from "./bot-internal.controller";
 import { BotInternalGuard } from "./bot-internal.guard";
+import { PlacementService } from "./placement.service";
+import { PlacementController } from "./placement.controller";
+import { UserAdminService } from "./user-admin.service";
+import { CacheService } from "./cache.service";
+import { MeilisearchService } from "./meilisearch.service";
 
-@Module({ imports: [PrismaModule], controllers: [MarketController, AuthController, AdminController, SiteController, BotInternalController], providers: [MarketService, AuthService, ObjectStoreService, IngestionService, SiteSettingsService, GatewayDirectoryService, GatewayProbeService, SubmissionService, BotService, AdminGuard, BotInternalGuard] })
+@Module({ imports: [PrismaModule], controllers: [MarketController, AuthController, AdminController, SiteController, BotInternalController, PlacementController], providers: [MarketService, AuthService, ObjectStoreService, IngestionService, SiteSettingsService, GatewayDirectoryService, GatewayProbeService, SubmissionService, BotService, PlacementService, UserAdminService, AdminGuard, BotInternalGuard, CacheService, MeilisearchService] })
 export class AppModule {}

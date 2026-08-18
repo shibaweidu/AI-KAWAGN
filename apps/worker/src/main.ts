@@ -13,6 +13,7 @@ const defaultJobOptions = { attempts: 5, backoff: { type: "exponential" as const
 
 export const indexOutboxQueue = new Queue("index-outbox", { connection, defaultJobOptions });
 export const ldxpSyncQueue = new Queue("ldxp-sync", { connection, defaultJobOptions: { ...defaultJobOptions, attempts: 3, backoff: { type: "exponential", delay: 30_000 } } });
+export const publicCatalogSyncQueue = new Queue("public-catalog-sync", { connection, defaultJobOptions: { ...defaultJobOptions, attempts: 2, backoff: { type: "exponential", delay: 60_000 } } });
 export const gatewaySyncQueue = new Queue("gateway-directory-sync", { connection, defaultJobOptions: { ...defaultJobOptions, attempts: 3, backoff: { type: "exponential", delay: 30_000 } } });
 export const gatewayProbeQueue = new Queue("gateway-model-probe", { connection, defaultJobOptions: { ...defaultJobOptions, attempts: 1, removeOnComplete: 1000, removeOnFail: 5000 } });
 
@@ -72,7 +73,7 @@ const ldxpWorker = new Worker("ldxp-sync", async (job) => {
       orderBy: { createdAt: "asc" },
     });
     const dueAt = (source.lastCheckedAt?.getTime() || 0) + source.pollIntervalSeconds * 1000;
-    const due = process.env.ENABLE_SOURCE_SCHEDULERS === "true" && source.enabled && source.pollIntervalSeconds >= 30 * 60 && Date.now() >= dueAt;
+    const due = process.env.ENABLE_SOURCE_SCHEDULERS === "true" && source.enabled && source.pollIntervalSeconds >= 10 * 60 && Date.now() >= dueAt;
     if (!requested && !due) return { skipped: "not_due" };
     run = requested || await prisma.ingestionRun.create({
       data: { dataSourceId: source.id, kind: "ldxp-scheduled-sync", status: SyncStatus.QUEUED },
@@ -112,6 +113,32 @@ const ldxpWorker = new Worker("ldxp-sync", async (job) => {
     throw error;
   }
 }, { connection, concurrency: 1, lockDuration: 30 * 60_000 });
+
+const publicCatalogWorker = new Worker("public-catalog-sync", async () => {
+  if (process.env.PAUSE_SOURCE_JOBS === "true") return { skipped: "source_jobs_paused" };
+  const keys = ["cardnav"];
+  const results: Array<Record<string, unknown>> = [];
+  for (const key of keys) {
+    const source = await prisma.dataSource.findUnique({ where: { key } });
+    if (!source) { results.push({ key, skipped: "source_missing" }); continue; }
+    const requestKind = `${key}-sync-request`;
+    const scheduledKind = `${key}-scheduled-sync`;
+    const requested = await prisma.ingestionRun.findFirst({ where: { dataSourceId: source.id, kind: requestKind, status: SyncStatus.QUEUED }, orderBy: { createdAt: "asc" } });
+    const dueAt = (source.lastCheckedAt?.getTime() || 0) + source.pollIntervalSeconds * 1000;
+    const due = process.env.ENABLE_SOURCE_SCHEDULERS === "true" && source.enabled && source.pollIntervalSeconds >= 60 * 60 && Date.now() >= dueAt;
+    if (!requested && !due) { results.push({ key, skipped: "not_due" }); continue; }
+    const running = await prisma.ingestionRun.findFirst({ where: { dataSourceId: source.id, kind: { in: [requestKind, scheduledKind] }, status: { in: [SyncStatus.QUEUED, SyncStatus.RUNNING] } }, orderBy: { createdAt: "asc" } });
+    if (running && running.id !== requested?.id) { results.push({ key, skipped: "already_running", runId: running.id }); continue; }
+    const run = requested || await prisma.ingestionRun.create({ data: { dataSourceId: source.id, kind: scheduledKind, status: SyncStatus.QUEUED } });
+    try {
+      results.push(await refreshPublicCatalog(key, run.id));
+    } catch (error) {
+      results.push({ key, failed: true, error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  }
+  return { results };
+}, { connection, concurrency: 1, lockDuration: 45 * 60_000 });
 
 const gatewayWorker = new Worker("gateway-directory-sync", async () => {
   if (process.env.PAUSE_SOURCE_JOBS === "true") return { skipped: "source_jobs_paused" };
@@ -161,7 +188,7 @@ async function meiliWrite(index: string, documents: unknown[]) {
 
 async function indexOffer(id: string) {
   const offer = await prisma.offer.findUnique({ where: { id }, include: { canonicalProduct: { include: { category: true } }, shop: true, dataSource: true } });
-  if (!offer || offer.dataSource.key !== "ldxp") return;
+  if (!offer) return;
   await meiliWrite("offers", [{
     id: offer.id, productId: offer.canonicalProductId, title: offer.canonicalProduct.title,
     normalizedTitle: offer.canonicalProduct.normalizedTitle, category: offer.canonicalProduct.category.name,
@@ -173,7 +200,7 @@ async function indexOffer(id: string) {
 
 async function indexShop(id: string) {
   const shop = await prisma.shop.findUnique({ where: { id }, include: { sourceMappings: { include: { dataSource: true } } } });
-  if (!shop || !shop.sourceMappings.some((mapping) => mapping.dataSource.key === "ldxp")) return;
+  if (!shop) return;
   await meiliWrite("shops", [{ id: shop.id, slug: shop.slug, name: shop.name, logoUrl: shop.logoUrl, description: shop.description, verified: true, active: shop.status === "ACTIVE", publishedAt: shop.publishedAt?.toISOString() }]);
 }
 
@@ -219,6 +246,18 @@ async function refreshLdxpProductBackfill(runId: string) {
   return { runId, output: output.slice(-4000) };
 }
 
+async function refreshPublicCatalog(key: string, runId: string) {
+  const repoRoot = resolve(__dirname, "../../..");
+  const runner = process.env.NODE_ENV === "production"
+    ? resolve(repoRoot, "apps/api/dist/sync-public-catalog.js")
+    : require.resolve("tsx/cli");
+  const args = process.env.NODE_ENV === "production"
+    ? [runner, `--key=${key}`, `--run-id=${runId}`]
+    : [runner, resolve(repoRoot, "apps/api/src/sync-public-catalog.ts"), `--key=${key}`, `--run-id=${runId}`];
+  const output = await runNode(args, repoRoot);
+  return { key, runId, output: output.slice(-8000) };
+}
+
 async function refreshGatewayDirectory() {
   const repoRoot = resolve(__dirname, "../../..");
   const runner = process.env.NODE_ENV === "production"
@@ -252,26 +291,51 @@ function runNode(args: string[], cwd: string) {
 }
 
 async function registerScheduler() {
+  await configureMeilisearch().catch((error) => logger.warn({ error: String(error) }, "Meilisearch settings unavailable; API will use PostgreSQL fallback"));
   await indexOutboxQueue.upsertJobScheduler("outbox-every-10s", { every: 10_000 }, { name: "drain", data: {} });
   await ldxpSyncQueue.upsertJobScheduler("ldxp-source-every-minute", { every: 60_000 }, { name: "refresh", data: {} });
+  await publicCatalogSyncQueue.upsertJobScheduler("public-catalog-every-minute", { every: 60_000 }, { name: "refresh", data: {} });
   await gatewaySyncQueue.upsertJobScheduler("gateway-directory-every-minute", { every: 60_000 }, { name: "refresh", data: {} });
   // Manual probe requests should be picked up quickly; the config lease still prevents duplicate execution.
   await gatewayProbeQueue.upsertJobScheduler("gateway-model-probe-every-minute", { every: 10_000 }, { name: "scan", data: {} });
   await gatewayProbeQueue.upsertJobScheduler("gateway-model-probe-cleanup-daily", { every: 24 * 60 * 60_000 }, { name: "cleanup", data: {} });
 }
 
+async function configureMeilisearch() {
+  const host = process.env.MEILI_HOST || "http://localhost:7700";
+  const headers = { "content-type": "application/json", authorization: `Bearer ${process.env.MEILI_MASTER_KEY || "change-me"}` };
+  for (const [uid, settings] of [["offers", { searchableAttributes: ["title", "normalizedTitle", "category", "shopName"], filterableAttributes: ["productId", "shopId", "active", "category"], sortableAttributes: ["price", "observedAt"] }], ["shops", { searchableAttributes: ["name", "description"], filterableAttributes: ["active", "publishedAt"] }]] as const) {
+    const existing = await fetch(`${host}/indexes/${uid}`, { headers, signal: AbortSignal.timeout(5_000) });
+    if (existing.ok && ((await existing.json()) as { primaryKey?: string | null }).primaryKey == null) {
+      const stats = await fetch(`${host}/indexes/${uid}/stats`, { headers, signal: AbortSignal.timeout(5_000) });
+      const count = stats.ok ? Number(((await stats.json()) as { numberOfDocuments?: number }).numberOfDocuments || 0) : 1;
+      if (count > 0) throw new Error(`Meilisearch index ${uid} has documents but no primary key; rebuild it manually`);
+      const remove = await fetch(`${host}/indexes/${uid}`, { method: "DELETE", headers, signal: AbortSignal.timeout(5_000) });
+      if (!remove.ok) throw new Error(`Meilisearch index deletion returned ${remove.status}`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } else if (!existing.ok && existing.status !== 404) throw new Error(`Meilisearch index lookup returned ${existing.status}`);
+    const create = await fetch(`${host}/indexes`, { method: "POST", headers, body: JSON.stringify({ uid, primaryKey: "id" }), signal: AbortSignal.timeout(5_000) });
+    if (!create.ok && create.status !== 409) throw new Error(`Meilisearch index returned ${create.status}`);
+    const response = await fetch(`${host}/indexes/${uid}/settings`, { method: "PATCH", headers, body: JSON.stringify(settings), signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new Error(`Meilisearch settings returned ${response.status}`);
+  }
+}
+
 registerScheduler().catch((error) => { logger.error({ error }, "index scheduler registration failed"); process.exitCode = 1; });
 indexWorker.on("failed", (job, error) => logger.error({ queue: indexWorker.name, jobId: job?.id, error: error.message }, "index job failed"));
 ldxpWorker.on("failed", (job, error) => logger.error({ queue: ldxpWorker.name, jobId: job?.id, error: error.message }, "LDXP sync job failed"));
+publicCatalogWorker.on("failed", (job, error) => logger.error({ queue: publicCatalogWorker.name, jobId: job?.id, error: error.message }, "Public catalog sync job failed"));
 gatewayWorker.on("failed", (job, error) => logger.error({ queue: gatewayWorker.name, jobId: job?.id, error: error.message }, "Gateway directory sync job failed"));
 gatewayProbeWorker.on("failed", (job, error) => logger.error({ queue: gatewayProbeWorker.name, jobId: job?.id, error: error.message }, "Gateway model probe failed"));
 process.on("SIGTERM", async () => {
   await indexWorker.close();
   await ldxpWorker.close();
+  await publicCatalogWorker.close();
   await gatewayWorker.close();
   await gatewayProbeWorker.close();
   await indexOutboxQueue.close();
   await ldxpSyncQueue.close();
+  await publicCatalogSyncQueue.close();
   await gatewaySyncQueue.close();
   await gatewayProbeQueue.close();
   await prisma.$disconnect();

@@ -148,8 +148,6 @@ export function GatewayProbeConfig({ gatewayId, gatewayName, managedListingId, m
 
 function formatTime(value: string) { return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Shanghai" }).format(new Date(value)); }
 function ProbeTimeline({ buckets, intervalMinutes, label }: { buckets: ProbeBucket[]; intervalMinutes: number; label: string }) {
-  const visibleBuckets = buckets.filter((bucket) => bucket.attempts > 0);
-  if (!visibleBuckets.length) return <div className="probe-model-timeline"><span>暂无已记录的探测时间桶</span></div>;
   const unit = intervalMinutes >= 60 && intervalMinutes % 60 === 0 ? `每格 ${intervalMinutes / 60} 小时` : `每格 ${intervalMinutes} 分钟`;
-  return <div className="probe-model-timeline"><ol style={{ gridTemplateColumns: `repeat(${Math.max(visibleBuckets.length, 1)}, minmax(2px, 1fr))` }} aria-label={`${label} 已记录的探测时间桶`}>{visibleBuckets.map((bucket) => <li key={bucket.startedAt} className={bucket.successRate === 100 ? "online" : bucket.successRate === 0 ? "offline" : "partial"} title={`${formatTime(bucket.startedAt)}，${bucket.successes}/${bucket.attempts} 次成功，成功率 ${bucket.successRate}%${bucket.averageResponseMs === null ? "" : `，平均 ${bucket.averageResponseMs} ms`}`} />)}</ol><span>{unit}</span></div>;
+  return <div className="probe-model-timeline"><ol aria-label={`${label} 最近 60 个探测时间桶`}>{buckets.map((bucket) => <li key={bucket.startedAt} className={bucket.attempts === 0 ? undefined : bucket.successRate === 100 ? "online" : bucket.successRate === 0 ? "offline" : "partial"} title={`${formatTime(bucket.startedAt)}，${bucket.attempts ? `${bucket.successes}/${bucket.attempts} 次成功，成功率 ${bucket.successRate}%` : "无记录"}${bucket.averageResponseMs === null ? "" : `，平均 ${bucket.averageResponseMs} ms`}`} />)}</ol><span>{unit}</span></div>;
 }

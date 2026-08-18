@@ -33,11 +33,11 @@ export function GatewayProbeAvailability({ availability, title = "本站模型�
     return () => window.clearInterval(timer);
   }, []);
   const granularityMinutes = current?.granularityMinutes || 60;
-  const displayTitle = granularityMinutes <= 1 ? title.replace("最近 48 小时", "最近 48 分钟") : title;
+  const displayTitle = title.replace(/最近 48 小时|最近 48 分钟/, formatBucketWindow(granularityMinutes));
   const countdown = formatCountdown(current?.nextInferenceAt || null, now);
   return <section className="gateway-model-availability" aria-labelledby="gateway-model-title">
     <header><div><span className="kicker">本站真实探测</span><h2 id="gateway-model-title">{displayTitle}</h2><p>{description}</p></div><div className="gateway-probe-meta"><span className="gateway-probe-protocol">GET /v1/models · POST /v1/chat/completions</span>{current?.configured && <span className="gateway-probe-next">下次更新时间：{countdown}</span>}</div></header>
-    {!current?.configured ? <p className="gateway-monitor-empty">尚未配置本站模型探测</p> : !current.models.length ? <p className="gateway-monitor-empty">探测已配置，尚无完成过真实推理的模型</p> : <div className="gateway-model-list">{current.models.map((model) => { const buckets = visibleBuckets(model.buckets, granularityMinutes); return <article className="gateway-model-card" key={model.id}><div className="gateway-model-head"><div><strong title={model.modelId}>{model.displayName}</strong><code>{model.modelId}</code></div><span className={`probe-status ${model.status}`}>{modelStatusLabel(model.status)}</span></div><dl><div><dt>最近检测</dt><dd>{model.lastCheckedAt ? formatDate(model.lastCheckedAt) : "—"}</dd></div><div><dt>响应时间</dt><dd>{model.lastResponseMs === null ? "—" : `${model.lastResponseMs} ms`}</dd></div><div><dt>公开错误</dt><dd>{model.errorCategory ? probeErrorLabel(model.errorCategory) : "无"}</dd></div></dl>{buckets.length ? <ol className={`gateway-probe-buckets${buckets.length === 1 ? " compact" : ""}`} style={{ gridTemplateColumns: `repeat(${Math.max(buckets.length, 1)}, minmax(3px, 1fr))` }} aria-label={`${model.displayName} 已记录的探测时间桶`}>{buckets.map((bucket) => <li key={bucket.startedAt} className={bucket.successRate === 100 ? "online" : bucket.successRate === 0 ? "offline" : "partial"} title={probeBucketTitle(bucket)} />)}</ol> : <p className="gateway-monitor-no-buckets">暂无已记录的探测时间桶</p>}<div className="gateway-monitor-range"><span>{model.lastSuccessAt ? `最近成功 ${formatShortDate(model.lastSuccessAt)}` : "尚无成功记录"}</span><span>{formatInterval(granularityMinutes)} · 自动刷新</span></div></article>; })}</div>}
+    {!current?.configured ? <p className="gateway-monitor-empty">尚未配置本站模型探测</p> : !current.models.length ? <p className="gateway-monitor-empty">探测已配置，尚无完成过真实推理的模型</p> : <div className="gateway-model-list">{current.models.map((model) => { const buckets = model.buckets; return <article className="gateway-model-card" key={model.id}><div className="gateway-model-head"><div><strong title={model.modelId}>{model.displayName}</strong><code>{model.modelId}</code></div><span className={`probe-status ${model.status}`}>{modelStatusLabel(model.status)}</span></div><dl><div><dt>最近检测</dt><dd>{model.lastCheckedAt ? formatDate(model.lastCheckedAt) : "—"}</dd></div><div><dt>响应时间</dt><dd>{model.lastResponseMs === null ? "—" : `${model.lastResponseMs} ms`}</dd></div><div><dt>公开错误</dt><dd>{model.errorCategory ? probeErrorLabel(model.errorCategory) : "无"}</dd></div></dl>{buckets.length ? <ol className="gateway-probe-buckets" aria-label={`${model.displayName} 最近 60 个探测时间桶`}>{buckets.map((bucket) => <li key={bucket.startedAt} className={bucket.attempts === 0 ? undefined : bucket.successRate === 100 ? "online" : bucket.successRate === 0 ? "offline" : "partial"} title={probeBucketTitle(bucket)} />)}</ol> : <p className="gateway-monitor-no-buckets">暂无已记录的探测时间桶</p>}<div className="gateway-monitor-range"><span>{model.lastSuccessAt ? `最近成功 ${formatShortDate(model.lastSuccessAt)}` : "尚无成功记录"}</span><span>{formatInterval(granularityMinutes)} · 自动刷新</span></div></article>; })}</div>}
   </section>;
 }
 
@@ -47,7 +47,12 @@ function probeBucketTitle(bucket: GatewayModelAvailability["models"][number]["bu
 function formatDate(value: string) { return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Shanghai" }).format(new Date(value)); }
 function formatShortDate(value: string) { return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Shanghai" }).format(new Date(value)); }
 function formatInterval(minutes: number) { return minutes >= 60 && minutes % 60 === 0 ? `每格 ${minutes / 60} 小时` : `每格 ${minutes} 分钟`; }
-function visibleBuckets(buckets: GatewayModelAvailability["models"][number]["buckets"], intervalMinutes: number) { return (intervalMinutes <= 1 ? buckets.slice(-48) : buckets).filter((bucket) => bucket.attempts > 0); }
+function formatBucketWindow(intervalMinutes: number) {
+  const totalMinutes = intervalMinutes * 60;
+  if (totalMinutes % (24 * 60) === 0) return `最近 ${totalMinutes / (24 * 60)} 天`;
+  if (totalMinutes % 60 === 0) return `最近 ${totalMinutes / 60} 小时`;
+  return `最近 ${totalMinutes} 分钟`;
+}
 function formatCountdown(value: string | null, now: number) {
   if (!value) return "等待探测";
   const remaining = new Date(value).getTime() - now;

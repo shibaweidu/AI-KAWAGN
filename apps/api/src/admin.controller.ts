@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Query, Req, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Param, Post, Query, Req, UploadedFile, UploadedFiles, UseGuards, UseInterceptors } from "@nestjs/common";
 import type { Request } from "express";
 import { FileFieldsInterceptor, FileInterceptor } from "@nestjs/platform-express";
 import { AdminGuard } from "./admin.guard";
@@ -9,6 +9,8 @@ import { GatewayProbeService } from "./gateway-probe.service";
 import { AuthService } from "./auth.service";
 import { SubmissionService } from "./submission.service";
 import { BotService } from "./bot.service";
+import { PlacementService } from "./placement.service";
+import { UserAdminService } from "./user-admin.service";
 
 @Controller("admin")
 @UseGuards(AdminGuard)
@@ -21,9 +23,24 @@ export class AdminController {
     private readonly submissions: SubmissionService,
     private readonly auth: AuthService,
     private readonly bots: BotService,
+    private readonly placements: PlacementService,
+    private readonly users: UserAdminService,
   ) {}
 
   @Get("bots") botsOverview() { return this.bots.overview(); }
+  @Get("users") async usersList(@Query() query: Record<string, unknown>, @Req() request: Request) { await this.auth.requireAdmin(request.cookies?.ai_card_session); return this.users.list(query); }
+  @Get("users/:id") async userDetail(@Param("id") id: string, @Req() request: Request) { await this.auth.requireAdmin(request.cookies?.ai_card_session); return this.users.detail(id); }
+  @Post("users/:id/status") async updateUserStatus(@Param("id") id: string, @Body() body: unknown, @Req() request: Request) { await this.auth.requireAdmin(request.cookies?.ai_card_session); return this.users.changeStatus(id, body); }
+  @Post("users/:id/role") async updateUserRole(@Param("id") id: string, @Body() body: unknown, @Req() request: Request) { await this.auth.requireAdmin(request.cookies?.ai_card_session); return this.users.changeRole(id, body); }
+  @Get("placements/config") placementConfig() { return this.placements.adminConfig(); }
+  @Get("placements/payment-config") placementPaymentConfig() { return this.placements.paymentConfig(); }
+  @Post("placements/payment-config") async savePlacementPaymentConfig(@Body() body: unknown, @Req() request: Request) { await this.auth.requireAdmin(request.cookies?.ai_card_session); return this.placements.savePaymentConfig(body); }
+  @Post("placements/config") async savePlacementConfig(@Body() body: unknown, @Req() request: Request) { const user = await this.auth.requireOperator(request.cookies?.ai_card_session); if (user.role !== "admin") throw new ForbiddenException("仅管理员可以修改投放价格"); return this.placements.saveAdminConfig(body); }
+  @Get("placements/orders") placementOrders() { return this.placements.adminOrders(); }
+  @Post("placements/orders/:id/approve") async approvePlacementOrder(@Param("id") id: string, @Body() body: { note?: string }, @Req() request: Request) { const user = await this.auth.requireOperator(request.cookies?.ai_card_session); return this.placements.approve(id, user.id, body?.note); }
+  @Post("placements/orders/:id/reject") async rejectPlacementOrder(@Param("id") id: string, @Body() body: { reason?: string }, @Req() request: Request) { const user = await this.auth.requireOperator(request.cookies?.ai_card_session); return this.placements.reject(id, user.id, String(body?.reason || "")); }
+  @Post("placements/orders/:id/refund") async refundPlacementOrder(@Param("id") id: string, @Req() request: Request) { const user = await this.auth.requireOperator(request.cookies?.ai_card_session); return this.placements.refund(id, user.id); }
+  @Get("placements/stats") async placementStats() { const orders = await this.placements.adminOrders(); return { total: orders.length, pendingReview: orders.filter((order: any) => order.status === "paid_pending_review").length, paid: orders.filter((order: any) => ["paid_pending_review", "approved"].includes(order.status)).length }; }
   @Post("bots/preview") botPreview(@Body() body: unknown) { return this.bots.preview(body); }
   @Post("bots/:platform") updateBot(@Param("platform") platform: string, @Body() body: unknown) { return this.bots.updateIntegration(platform, body); }
   @Get("bots/:platform/chats") botChats(@Param("platform") platform: string) { return this.bots.chats(platform); }

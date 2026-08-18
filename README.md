@@ -1,6 +1,6 @@
 # AI卡网
 
-面向数字商品授权店铺的聚合比价与导流平台。平台不处理支付、订单或卡密交付。
+面向数字商品授权店铺的聚合比价与导流平台。普通用户可提交赞助广告投放订单，支付由配置的易支付兼容接口处理，广告须管理员审核后展示；平台不保存银行卡号、密码或卡密。
 
 ## 快速开始
 
@@ -41,6 +41,18 @@ ENABLE_SOURCE_SCHEDULERS=false
 ```
 
 完成来源条款确认和候选审核后，才可在受控环境中启用调度器。所有外部数据先进入候选区，批准前不会出现在公开页面。
+
+### 高频检索优化
+
+公开商品和店铺检索采用 PostgreSQL 负责最终过滤、去重、排序和分页，Meilisearch 负责关键词候选召回；Meilisearch 或 Redis 暂时不可用时会自动回退数据库。Redis 还缓存热点统计、分类、目录和短时搜索结果，公开检索接口按客户端地址做共享限流。
+
+数据库迁移会创建商品、店铺检索复合索引和 `pg_trgm` 模糊匹配索引。生产环境建议在 `DATABASE_URL` 中保留 `connection_limit` 与 `pool_timeout`，并通过 `SLOW_QUERY_MS` 调整慢查询日志阈值。搜索索引可在数据库恢复或首次部署后重建：
+
+```bash
+pnpm --filter @ai-card/worker rebuild:search
+```
+
+该命令会清理并分批重建 `offers`、`shops` 索引，不会修改业务数据库。
 
 ### 211b 商品补全
 
@@ -108,6 +120,22 @@ IMAGE_TAG=<git-commit-sha> ./scripts/deploy.sh
 
 API 容器每次启动都会先运行 `prisma migrate deploy`。数据库、Redis、Meilisearch、MinIO 和 Caddy 数据使用具名卷，更新容器不会清空数据。
 
+Docker 部署不需要手动执行 `prisma generate` 或 `prisma migrate deploy`：镜像构建阶段会生成 Prisma Client，API 容器启动时会自动执行数据库迁移。Meilisearch 的 Worker 启动时会自动创建和配置索引，但不会在每次发布时重复全量导入数据。
+
+首次部署、恢复种子数据库、迁移旧版本索引，或确认索引数据不完整时，再执行一次全量重建：
+
+```bash
+REBUILD_SEARCH_INDEX=1 ./scripts/deploy.sh
+```
+
+也可以在服务已运行时单独执行：
+
+```bash
+docker compose --env-file .env.production -f compose.prod.yml exec -T worker node apps/worker/dist/rebuild-search-index.js
+```
+
+普通版本更新使用 `PULL_LATEST=1 ./scripts/deploy.sh` 即可，不需要每次重建搜索索引。全量重建只会更新 Meilisearch，不会修改 PostgreSQL 业务数据。
+
 ### 数据与管理员
 
 单独恢复尚未启动过应用的空数据库：
@@ -124,6 +152,12 @@ API 容器每次启动都会先运行 `prisma migrate deploy`。数据库、Redi
 ```
 
 `.env.production`、`backups/` 和 `*.dump` 已被 Git 忽略，不要上传到 GitHub。生产环境默认关闭来源定时采集，完成来源权限确认后再设置 `ENABLE_SOURCE_SCHEDULERS=true`。
+
+### 日志文件
+
+根目录下的 `.api-*.log`、`.worker-*.log`、`.web-*.log`、`.dev-*.log` 等文件是本地开发或调试过程中生成的历史日志，不是源码、数据库或 Docker 部署所必需的文件。它们已被 `.gitignore` 和 `.dockerignore` 忽略，不会上传到 GitHub，也不会进入 Docker 镜像。
+
+确认不再需要排查历史问题后，可以删除这些根目录日志；删除前不需要停止 Docker 数据卷。生产环境应通过 `docker compose logs`、Docker 日志驱动或服务器集中日志系统查看运行日志，不要把日志文件提交到仓库。需要保留的是 `.env.production`、数据库备份和 Docker 数据卷，它们与日志文件不是一回事。
 
 ### 中转站目录同步
 
@@ -190,7 +224,6 @@ TELEGRAM_BOT_ENABLED=true
 
 ## 采集边界
 
-- PriceAI 仅读取官方公开快照 Feed，不抓取 HTML 或内部 API。
 - 淘卡优仅通过 sitemap 发现候选，并以单并发、至少 5 秒间隔补全新增公开店铺页。
 - AIProbe 保持禁用，取得书面授权或公开 API 前不得采集。
 - 授权直采仅面向已验证或留存授权证据的 HTTPS 原店；Worker 拒绝凭证 URL、内网 IP、重定向链、异常内容类型和超大响应。

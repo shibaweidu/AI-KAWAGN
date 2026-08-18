@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { FormEvent } from "react";
 import Link from "next/link";
 import {
-  ArrowSquareOut, CaretDown, Clock, Gauge, ThumbsDown, ThumbsUp, WifiHigh, WifiSlash,
+  ArrowLeft, ArrowRight, ArrowSquareOut, CaretDown, CaretUp, Clock, Gauge, ThumbsDown, ThumbsUp, WifiHigh, WifiSlash,
 } from "@phosphor-icons/react";
 import type { GatewayDirectoryEntry, GatewayGroupedDirectory } from "@ai-card/contracts";
 import { MediaThumbnail } from "./MediaThumbnail";
@@ -16,23 +17,122 @@ type Props = {
 export function GatewayDirectoryGroups({ directory, query }: Props) {
   const [otherItems, setOtherItems] = useState(directory.other.items);
   const [page, setPage] = useState(directory.other.page);
+  const [jumpPage, setJumpPage] = useState(String(directory.other.page));
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const initialItems = useRef(directory.other.items);
+  const requestSequence = useRef(0);
+  const abortController = useRef<AbortController | null>(null);
+  const lastRequest = useRef<{ targetPage: number; mode: "append" | "replace" } | null>(null);
+  const queryKey = JSON.stringify(query);
   const hasMore = page < directory.other.totalPages;
+  const hasPrevious = page > 1;
+  const hasNext = page < directory.other.totalPages;
+  const hasExpandedView = page > 1 || otherItems.length > initialItems.current.length;
 
-  async function loadMore() {
-    if (loading || !hasMore) return;
+  useEffect(() => {
+    initialItems.current = directory.other.items;
+    setOtherItems(directory.other.items);
+    setPage(directory.other.page);
+    setJumpPage(String(directory.other.page));
+    setError("");
+    setLoading(false);
+    requestSequence.current += 1;
+    abortController.current?.abort();
+    abortController.current = null;
+    lastRequest.current = null;
+    return () => {
+      requestSequence.current += 1;
+      abortController.current?.abort();
+      abortController.current = null;
+    };
+  }, [queryKey]);
+
+  function paramsFor(targetPage: number) {
+    const params = new URLSearchParams({ ...query, otherPage: String(targetPage), pageSize: String(directory.other.pageSize) });
+    if (!query.online) params.delete("online");
+    return params;
+  }
+
+  async function fetchPage(targetPage: number, mode: "append" | "replace") {
+    if (loading || abortController.current) return false;
+    const requestId = ++requestSequence.current;
+    const controller = new AbortController();
+    abortController.current = controller;
+    lastRequest.current = { targetPage, mode };
     setLoading(true);
+    setError("");
     try {
-      const params = new URLSearchParams({ ...query, otherPage: String(page + 1), pageSize: String(directory.other.pageSize) });
-      if (!query.online) params.delete("online");
-      const response = await fetch(`/api/v1/gateway-directory-grouped?${params}`, { cache: "no-store" });
+      const response = await fetch(`/api/v1/gateway-directory-grouped?${paramsFor(targetPage)}`, { cache: "no-store", signal: controller.signal });
       if (!response.ok) throw new Error("加载失败");
       const next = await response.json() as GatewayGroupedDirectory;
-      setOtherItems((current) => [...current, ...next.other.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
+      if (requestId !== requestSequence.current) return false;
+      if (mode === "append") {
+        setOtherItems((current) => [...current, ...next.other.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
+      } else {
+        setOtherItems(next.other.items);
+      }
       setPage(next.other.page);
+      setJumpPage(String(next.other.page));
+      return true;
+    } catch (requestError) {
+      if (requestError instanceof DOMException && requestError.name === "AbortError") return false;
+      if (requestId === requestSequence.current) setError("页面加载失败，请重试");
+      return false;
     } finally {
-      setLoading(false);
+      if (requestId === requestSequence.current) {
+        setLoading(false);
+        abortController.current = null;
+      }
     }
+  }
+
+  function loadMore() {
+    if (!hasMore) return;
+    void fetchPage(page + 1, "append");
+  }
+
+  async function navigate(targetPage: number) {
+    if (targetPage < 1 || targetPage > directory.other.totalPages) {
+      lastRequest.current = null;
+      setError(`请输入 1-${directory.other.totalPages} 之间的页码`);
+      return false;
+    }
+    const succeeded = await fetchPage(targetPage, "replace");
+    if (succeeded) scrollToOtherGroup();
+    return succeeded;
+  }
+
+  function submitJump(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!/^\d+$/.test(jumpPage.trim())) {
+      lastRequest.current = null;
+      setError("请输入有效的整数页码");
+      return;
+    }
+    void navigate(Number(jumpPage));
+  }
+
+  function collapse() {
+    if (loading) return;
+    setOtherItems(initialItems.current);
+    setPage(1);
+    setJumpPage("1");
+    setError("");
+    lastRequest.current = null;
+    scrollToOtherGroup();
+  }
+
+  function scrollToOtherGroup() {
+    window.requestAnimationFrame(() => document.getElementById("gateway-other-title")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  function retry() {
+    if (!lastRequest.current) return;
+    const { targetPage, mode } = lastRequest.current;
+    void fetchPage(targetPage, mode).then((succeeded) => {
+      if (succeeded && mode === "replace") scrollToOtherGroup();
+    });
   }
 
   return <div className="gateway-group-stack">
@@ -44,7 +144,17 @@ export function GatewayDirectoryGroups({ directory, query }: Props) {
     <section className="gateway-other-group" aria-labelledby="gateway-other-title">
       <header><div><span>全部收录</span><h2 id="gateway-other-title">其他中转站</h2></div><strong>{directory.other.total.toLocaleString("zh-CN")} 个中转站</strong></header>
       {otherItems.length > 0 ? <div className="gateway-compact-grid">{otherItems.map((item) => <GatewayCompactCard item={item} key={item.id} />)}</div> : <div className="gateway-group-empty">暂无符合条件的中转站</div>}
-      {hasMore && <button className="gateway-load-more" type="button" onClick={() => void loadMore()} disabled={loading}>{loading ? <Clock className="spin" /> : <CaretDown />}{loading ? "正在加载" : "加载更多"}</button>}
+      {(hasMore || hasExpandedView || directory.other.totalPages > 1) && <div className="gateway-pagination" aria-label="其他中转站分页">
+        {hasMore && <button className="gateway-load-more" type="button" onClick={loadMore} disabled={loading}>{loading ? <Clock className="spin" /> : <CaretDown />}{loading ? "正在加载" : "加载更多"}</button>}
+        <div className="gateway-page-controls">
+          <button className="gateway-page-button" type="button" onClick={() => void navigate(page - 1)} disabled={loading || !hasPrevious}><ArrowLeft />上一页</button>
+          <span className="gateway-page-indicator">第 {page} / {Math.max(directory.other.totalPages, 1)} 页</span>
+          <button className="gateway-page-button" type="button" onClick={() => void navigate(page + 1)} disabled={loading || !hasNext}>下一页<ArrowRight /></button>
+          <form className="gateway-page-jump" onSubmit={submitJump} noValidate><label htmlFor="gateway-page-input">跳转到</label><input id="gateway-page-input" inputMode="numeric" maxLength={8} value={jumpPage} onChange={(event) => setJumpPage(event.target.value)} aria-label="页码" disabled={loading} /><span>页</span><button className="button ghost compact" type="submit" disabled={loading}>跳转</button></form>
+          {hasExpandedView && <button className="gateway-collapse-button" type="button" onClick={collapse} disabled={loading}><CaretUp />收起</button>}
+        </div>
+        {error && <div className="gateway-pagination-error" role="alert"><span>{error}</span>{lastRequest.current && <button type="button" onClick={retry} disabled={loading}>重试</button>}</div>}
+      </div>}
     </section>
   </div>;
 }

@@ -68,7 +68,8 @@ describe("gateway probe response redaction", () => {
     };
     const response = await new GatewayProbeService(prisma as never).publicAvailabilityForListing("listing");
     expect(response).toMatchObject({ configured: true, models: [{ modelId: "gpt-test", status: "available", buckets: expect.any(Array) }] });
-    expect(response.models[0].buckets).toHaveLength(48);
+    expect(response.models[0].buckets).toHaveLength(60);
+    expect(response.models[0].buckets.filter((bucket) => bucket.attempts === 0)).toHaveLength(59);
   });
 
   it("does not expose inactive or non-sponsor listings", async () => {

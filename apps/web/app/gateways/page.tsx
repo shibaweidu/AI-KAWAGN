@@ -18,7 +18,7 @@ export default async function GatewaysPage({ searchParams }: { searchParams: Pro
   const q = (params.q || "").trim();
   const online = params.online === "true" || params.online === "false" ? params.online : "";
   const sort = ["featured", "reputation", "availability", "newest"].includes(params.sort || "") ? params.sort! : "featured";
-  const query = new URLSearchParams({ q, sort, otherPage: "1", pageSize: "24" });
+  const query = new URLSearchParams({ q, sort, otherPage: "1", pageSize: "36" });
   if (online) query.set("online", online);
   const [directory, curated, settings] = await Promise.all([
     serverApi<GatewayGroupedDirectory>(`/gateway-directory-grouped?${query}`).catch(() => emptyDirectory()),
@@ -35,7 +35,7 @@ export default async function GatewaysPage({ searchParams }: { searchParams: Pro
     <section className="page-hero compact gateway-hero"><div className="shell"><span className="kicker"><ArrowsLeftRight />中转服务目录</span><h1>AI API 中转站</h1><p>按使用场景快速筛选中转服务，展示信息不代表本平台认证。</p></div></section>
     <section className="shell gateway-page">
       {notice.enabled && <div className="gateway-risk-note"><ShieldWarning /><div><strong>{notice.title}</strong><p>{notice.description}</p></div></div>}
-      {curated.length > 0 && <section className="gateway-sponsors" aria-labelledby="gateway-sponsors-title"><div className="gateway-sponsor-head"><div><span className="kicker"><Megaphone />合作推广</span><h2 id="gateway-sponsors-title">赞助商</h2></div><span>付费展示</span></div><GatewaySponsorGrid items={curated} /></section>}
+      {curated.length > 0 && <section className="gateway-sponsors" aria-labelledby="gateway-sponsors-title"><div className="gateway-sponsor-head"><div><span className="kicker"><Megaphone />合作推广</span><h2 id="gateway-sponsors-title">赞助商</h2></div><span>后台推荐</span></div><GatewaySponsorGrid items={curated} /></section>}
       <section className="gateway-directory-section">
         <div className="gateway-directory-head"><div><span className="kicker"><WifiHigh />中转目录</span><h2>选择适合的中转站</h2><p>共 {directory.total.toLocaleString("zh-CN")} 条已审核记录</p></div>
           <form className="gateway-filter-form grouped" action="/gateways"><label><MagnifyingGlass /><input name="q" defaultValue={q} placeholder="搜索站名、模型或倍率" aria-label="搜索中转站" /></label><select name="online" defaultValue={online} aria-label="在线状态"><option value="">全部状态</option><option value="true">当前在线</option><option value="false">当前离线</option></select><select name="sort" defaultValue={sort} aria-label="排序"><option value="featured">综合排序</option><option value="availability">可用率优先</option><option value="reputation">口碑优先</option><option value="newest">最近收录</option></select><button className="button dark" type="submit"><SlidersHorizontal />筛选</button></form>
@@ -47,5 +47,5 @@ export default async function GatewaysPage({ searchParams }: { searchParams: Pro
 }
 
 function emptyDirectory(): GatewayGroupedDirectory {
-  return { groups: [], other: { items: [], total: 0, page: 1, pageSize: 24, totalPages: 0 }, total: 0 };
+  return { groups: [], other: { items: [], total: 0, page: 1, pageSize: 36, totalPages: 0 }, total: 0 };
 }

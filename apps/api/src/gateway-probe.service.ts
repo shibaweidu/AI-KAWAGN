@@ -54,8 +54,9 @@ export class GatewayProbeService {
     const config = target.gatewayId
       ? await this.prisma.gatewayProbeConfig.findUnique({ where: { gatewayId: target.gatewayId }, include: { models: { orderBy: [{ enabled: "desc" }, { modelId: "asc" }] } } })
       : await this.prisma.gatewayProbeConfig.findFirst({ where: target, include: { models: { orderBy: [{ enabled: "desc" }, { modelId: "asc" }] } } });
+    const historyMinutes = PROBE_BUCKET_COUNT * (config?.bucketIntervalMinutes || 60);
     const results = config && this.prisma.gatewayProbeResult?.findMany
-      ? await this.prisma.gatewayProbeResult.findMany({ where: { configId: config.id, kind: GatewayProbeKind.INFERENCE, checkedAt: { gte: new Date(Date.now() - 48 * 60 * 60_000) }, modelId: { not: null } }, orderBy: { checkedAt: "asc" } })
+      ? await this.prisma.gatewayProbeResult.findMany({ where: { configId: config.id, kind: GatewayProbeKind.INFERENCE, checkedAt: { gte: new Date(Date.now() - historyMinutes * 60_000) }, modelId: { not: null } }, orderBy: { checkedAt: "asc" } })
       : [];
     return { gateway: owner, canManageKey: role === "admin", canManageConfig: role === "admin", config: config ? adminConfig(config, results) : null };
   }
@@ -158,14 +159,14 @@ export class GatewayProbeService {
 
   private async publicAvailabilityForConfig(config: { id: string; enabled: boolean; bucketIntervalMinutes?: number; lastInferenceAt?: Date | null; nextInferenceAt?: Date | null; models: Array<{ id: string; modelId: string; displayName: string; status: GatewayProbeModelStatus; lastCheckedAt: Date | null; lastSuccessAt: Date | null; lastResponseMs: number | null; lastErrorCategory: GatewayProbeErrorCategory | null }> } | null) {
     if (!config?.enabled) return { configured: false, models: [] };
-    const since = new Date(Date.now() - 48 * 60 * 60_000);
-    const results = await this.prisma.gatewayProbeResult.findMany({ where: { configId: config.id, kind: GatewayProbeKind.INFERENCE, checkedAt: { gte: since }, modelId: { not: null } }, orderBy: { checkedAt: "asc" } });
     const granularityMinutes = config.bucketIntervalMinutes || 60;
+    const since = new Date(Date.now() - PROBE_BUCKET_COUNT * granularityMinutes * 60_000);
+    const results = await this.prisma.gatewayProbeResult.findMany({ where: { configId: config.id, kind: GatewayProbeKind.INFERENCE, checkedAt: { gte: since }, modelId: { not: null } }, orderBy: { checkedAt: "asc" } });
     return { configured: true, ...(config.bucketIntervalMinutes ? { granularityMinutes } : {}), lastInferenceAt: config.lastInferenceAt?.toISOString() || null, nextInferenceAt: config.nextInferenceAt?.toISOString() || null, models: config.models.map((model) => ({
       id: model.id, modelId: model.modelId, displayName: model.displayName, status: model.status.toLowerCase(),
       lastCheckedAt: model.lastCheckedAt?.toISOString() || null, lastSuccessAt: model.lastSuccessAt?.toISOString() || null,
       lastResponseMs: model.lastResponseMs, errorCategory: model.lastErrorCategory?.toLowerCase() || null,
-      buckets: visibleProbeBuckets(aggregateProbeBuckets(results.filter((result) => result.modelId === model.id), bucketCount(granularityMinutes), granularityMinutes), granularityMinutes),
+      buckets: aggregateProbeBuckets(results.filter((result) => result.modelId === model.id), PROBE_BUCKET_COUNT, granularityMinutes),
     })) };
   }
 
@@ -422,12 +423,11 @@ export function aggregateProbeBuckets(results: Array<{ checkedAt: Date; success:
   return Array.from({ length: count }, (_, index) => { const startedAt = new Date(latest.getTime() - (count - index - 1) * intervalMs); const end = startedAt.getTime() + intervalMs; const rows = results.filter((row) => row.checkedAt.getTime() >= startedAt.getTime() && row.checkedAt.getTime() < end); const successes = rows.filter((row) => row.success); const timings = successes.map((row) => row.totalMs).filter((value): value is number => value !== null); return { startedAt: startedAt.toISOString(), attempts: rows.length, successes: successes.length, successRate: rows.length ? Math.round(successes.length / rows.length * 1000) / 10 : null, averageResponseMs: timings.length ? Math.round(timings.reduce((sum, value) => sum + value, 0) / timings.length) : null }; });
 }
 
-function bucketCount(bucketIntervalMinutes: number) { return bucketIntervalMinutes <= 1 ? 48 : Math.max(1, Math.round(48 * 60 / bucketIntervalMinutes)); }
-function visibleProbeBuckets<T>(buckets: T[], bucketIntervalMinutes: number) { return bucketIntervalMinutes <= 1 ? buckets.slice(-48) : buckets; }
+const PROBE_BUCKET_COUNT = 60;
 
 function normalizeBaseUrl(value: string) { const url = new URL(value); url.pathname = `${url.pathname.replace(/\/+$/, "")}/`; url.search = ""; url.hash = ""; return url.href; }
 function adminConfig(config: { id: string; baseUrl: string; apiKeyCiphertext: string | null; apiKeyLastFour: string | null; enabled: boolean; inferencePaused: boolean; pauseReason: GatewayProbeErrorCategory | null; modelListIntervalMinutes: number; inferenceIntervalMinutes: number; bucketIntervalMinutes?: number; nextModelListAt: Date | null; nextInferenceAt: Date | null; lastModelListAt: Date | null; lastInferenceAt: Date | null; models: Array<{ id: string; modelId: string; displayName: string; enabled: boolean; status: GatewayProbeModelStatus; lastCheckedAt: Date | null; lastResponseMs: number | null; lastErrorCategory: GatewayProbeErrorCategory | null }> }, results: Array<{ modelId: string | null; checkedAt: Date; success: boolean; totalMs: number | null }> = []) {
   const interval = config.bucketIntervalMinutes || 60;
-  return { id: config.id, baseUrl: config.baseUrl, hasApiKey: Boolean(config.apiKeyCiphertext), apiKeyLastFour: config.apiKeyLastFour, enabled: config.enabled, inferencePaused: config.inferencePaused, pauseReason: config.pauseReason?.toLowerCase() || null, modelListIntervalMinutes: config.modelListIntervalMinutes, inferenceIntervalMinutes: config.inferenceIntervalMinutes, ...(config.bucketIntervalMinutes ? { bucketIntervalMinutes: interval } : {}), nextModelListAt: config.nextModelListAt?.toISOString() || null, nextInferenceAt: config.nextInferenceAt?.toISOString() || null, lastModelListAt: config.lastModelListAt?.toISOString() || null, lastInferenceAt: config.lastInferenceAt?.toISOString() || null, models: config.models.map((model) => ({ ...model, status: model.status.toLowerCase(), lastCheckedAt: model.lastCheckedAt?.toISOString() || null, lastErrorCategory: model.lastErrorCategory?.toLowerCase() || null, buckets: visibleProbeBuckets(aggregateProbeBuckets(results.filter((result) => result.modelId === model.id), bucketCount(interval), interval), interval) })) };
+  return { id: config.id, baseUrl: config.baseUrl, hasApiKey: Boolean(config.apiKeyCiphertext), apiKeyLastFour: config.apiKeyLastFour, enabled: config.enabled, inferencePaused: config.inferencePaused, pauseReason: config.pauseReason?.toLowerCase() || null, modelListIntervalMinutes: config.modelListIntervalMinutes, inferenceIntervalMinutes: config.inferenceIntervalMinutes, ...(config.bucketIntervalMinutes ? { bucketIntervalMinutes: interval } : {}), nextModelListAt: config.nextModelListAt?.toISOString() || null, nextInferenceAt: config.nextInferenceAt?.toISOString() || null, lastModelListAt: config.lastModelListAt?.toISOString() || null, lastInferenceAt: config.lastInferenceAt?.toISOString() || null, models: config.models.map((model) => ({ ...model, status: model.status.toLowerCase(), lastCheckedAt: model.lastCheckedAt?.toISOString() || null, lastErrorCategory: model.lastErrorCategory?.toLowerCase() || null, buckets: aggregateProbeBuckets(results.filter((result) => result.modelId === model.id), PROBE_BUCKET_COUNT, interval) })) };
 }
 async function notifyOperatorsOnce(prisma: PrismaService, gatewayName: string, gatewayId: string, reason: GatewayProbeErrorCategory) { const title = "中转站模型探测已暂停"; const recent = await prisma.notification.findFirst({ where: { title, body: { contains: gatewayId }, createdAt: { gte: new Date(Date.now() - 24 * 3600_000) } } }); if (recent) return; const users = await prisma.user.findMany({ where: { role: { in: [Role.ADMIN, Role.MODERATOR] } }, select: { id: true } }); if (users.length) await prisma.notification.createMany({ data: users.map((user) => ({ userId: user.id, type: "gateway_probe_alert", title, body: `${gatewayName} (${gatewayId}) 的探测因 ${reason.toLowerCase()} 暂停，请更新专用 Key 后恢复。`, href: "/admin" })) }); }

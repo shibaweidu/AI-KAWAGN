@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import {
-  ArrowsClockwise, ArrowDown, ArrowUp, CheckCircle, Database, Eye, EyeSlash, Fire,
-  Gauge, Gear, ImageSquare, MagnifyingGlass, Play, Plus, ShieldCheck, SidebarSimple, Storefront, Tag, Timer,
+  ArrowsClockwise, ArrowDown, ArrowUp, ArrowSquareOut, CheckCircle, Clock, Database, Eye, EyeSlash, Fire,
+  Gauge, Gear, ImageSquare, MagnifyingGlass, Pause, Play, Plus, ShieldCheck, SidebarSimple, Storefront, Tag, Timer,
   UploadSimple, WarningCircle, XCircle, ArrowsLeftRight, Star, Megaphone, LinkSimple,
-  Robot, Pencil, Trash,
+  Robot, Pencil, Trash, CreditCard, UsersThree, UserMinus, UserPlus, UserCircle,
 } from "@phosphor-icons/react";
 import type { AdminHomeBanner, AdminSideAd, Announcement, AnnouncementSegment, BotAdminOverview, GatewayNotice, SearchAd, SiteSettings, SideAdSlot } from "@ai-card/contracts";
 import { MediaThumbnail } from "./MediaThumbnail";
@@ -14,7 +14,7 @@ import { GatewayProbeConfig } from "./GatewayProbeConfig";
 import { BotAdminPanel } from "./BotAdminPanel";
 import { AnnouncementRichTextEditor } from "./AnnouncementRichTextEditor";
 
-type SectionKey = "overview" | "site" | "announcement" | "banner" | "source" | "candidates" | "submissions" | "searches" | "ads" | "gateways" | "projects" | "bots";
+type SectionKey = "overview" | "site" | "announcement" | "banner" | "source" | "candidates" | "submissions" | "searches" | "ads" | "placements" | "users" | "gateways" | "projects" | "bots";
 type Candidate = { id: string; externalId: string; name: string; directoryUrl: string; homepageUrl: string | null; logoUrl: string | null; firstSeenAt: string; sourceSyncedAt: string | null; reviewStatus: string; dataSource: { key: string; name: string }; _count: { offerCandidates: number } };
 type CandidatePage = { items: Candidate[]; total: number; offerTotal: number; page: number; pageSize: number; totalPages: number };
 type Source = { id: string; key: string; name: string; kind: string; enabled: boolean; pollIntervalSeconds: number; lastCheckedAt: string | null; lastSuccessAt: string | null; lastSnapshotId: string | null; nextRunAt: string | null };
@@ -22,10 +22,15 @@ type Run = { id: string; kind: string; status: string; createdAt: string; counts
 type DiscoveryResult = { runId: string; pages: number; totalPages: number; totalShops: number; uniqueShops: number; created: number; updated: number; unchanged: number; pageDuplicates: number; caseVariantSkipped: number; productShopsRequested?: number; productShopsSucceeded?: number; productShopsFailed?: number; productsUpserted?: number; offersPromoted?: number; offersDeactivated?: number; categoriesSynced?: number; sampleCreated: Array<{ token: string; name: string }> };
 type ProductBackfillStatus = { totalShops: number; syncedShops: number; remainingShops: number; activeRun: { id: string; status: string; counts: Record<string, unknown> | null; createdAt: string } | null };
 type HotSearch = { id: string; term: string; position: number; active: boolean };
-type Listing = { id: string; title: string; description: string; url: string; thumbnailUrl: string | null; badge: string | null; modelTags: string[]; pricingClaims: string | null; active: boolean; position: number };
-type ListingDraft = { title: string; description: string; url: string; thumbnailUrl: string; badge: string; modelTags: string; pricingClaims: string };
+type Listing = { id: string; title: string; description: string; url: string; thumbnailUrl: string | null; badge: string | null; modelTags: string[]; pricingClaims: string | null; gatewayPlacement: boolean; homeSideSlot: SideAdSlot | null; homeBottomPlacement: boolean; active: boolean; position: number };
+type ListingDraft = { title: string; description: string; url: string; thumbnailUrl: string; badge: string; modelTags: string; pricingClaims: string; gatewayPlacement: boolean; homeSideSlot: "" | SideAdSlot; homeBottomPlacement: boolean };
 type SearchAdDraft = { title: string; description: string; url: string; backgroundImageUrl: string; logoUrl: string; label: string; keywords: string; content: AnnouncementSegment[]; global: boolean; startsAt: string; endsAt: string; active: boolean; clearBackgroundImage: boolean; clearLogo: boolean };
 type SideAdDraft = { title: string; url: string; imageUrl: string; label: string; active: boolean; clearImage: boolean };
+  type PlacementConfig = { key: string; kind: "gateway" | "shop"; name: string; description: string; dailyPrice: number; minDays: number; maxDays: number; capacity: number; enabled: boolean; position: number };
+type PaymentProviderConfig = { configured: boolean; apiUrl: string | null; pid: string | null; type: string; keyConfigured: boolean; keyLastFour: string | null; orderTimeoutMinutes: number; notifyUrl: string; returnUrl: string; missing: string[] };
+  type PlacementOrder = { id: string; orderNo: string; status: string; totalAmount: number; createdAt: string; transactionId?: string | null; reviewNote?: string | null; user: { email: string }; sponsorAd: { title: string; kind?: "gateway" | "shop"; description: string; imageUrl: string | null; badge: string | null; modelTags: string[]; pricingClaims: string | null }; items: Array<{ slotKey: string; name?: string; days: number; dailyPrice: number; subtotal: number }> };
+type AdminUser = { id: string; email: string; role: "buyer" | "merchant" | "moderator" | "admin"; verified: boolean; active: boolean; disabledAt: string | null; createdAt: string; ads: number; orders: number; orderStatuses: Record<string, number> };
+type AdminUserPage = { items: AdminUser[]; total: number; page: number; pageSize: number; totalPages: number };
 type GatewayReviewStatus = "pending" | "approved" | "rejected" | "duplicate" | "source_removed";
 type GatewayDisplayGroup = { id: string; key: string; name: string; position: number; active: boolean; count: number; filteredCount: number };
 type GatewayDirectoryAdminItem = {
@@ -56,18 +61,21 @@ const sections = [
   { key: "site" as const, label: "网站设置", Icon: Gear },
   { key: "announcement" as const, label: "顶部公告", Icon: Megaphone },
   { key: "banner" as const, label: "首页广告", Icon: ImageSquare },
-  { key: "source" as const, label: "链动小店采集", Icon: Database },
+  { key: "source" as const, label: "数据采集", Icon: Database },
   { key: "candidates" as const, label: "候选审核", Icon: ShieldCheck },
   { key: "submissions" as const, label: "收录投稿", Icon: LinkSimple },
   { key: "searches" as const, label: "热门搜索词", Icon: MagnifyingGlass },
   { key: "ads" as const, label: "搜索广告", Icon: Tag },
+  { key: "placements" as const, label: "付费广告", Icon: CreditCard },
+  { key: "users" as const, label: "用户管理", Icon: UsersThree, adminOnly: true },
   { key: "gateways" as const, label: "中转站展示", Icon: ArrowsLeftRight },
   { key: "projects" as const, label: "热门项目展示", Icon: Fire },
   { key: "bots" as const, label: "机器人接入", Icon: Robot },
 ];
 
 const emptyRichTextSegment: AnnouncementSegment = { text: "", bold: false, italic: false, underline: false, color: "default", href: null };
-const emptyListingDraft: ListingDraft = { title: "", description: "", url: "", thumbnailUrl: "", badge: "", modelTags: "", pricingClaims: "" };
+const emptyListingDraft: ListingDraft = { title: "", description: "", url: "", thumbnailUrl: "", badge: "", modelTags: "", pricingClaims: "", gatewayPlacement: false, homeSideSlot: "", homeBottomPlacement: false };
+const createListingDraft = (type: "gateway" | "project"): ListingDraft => ({ ...emptyListingDraft, gatewayPlacement: type === "gateway" });
 const emptySearchAdDraft: SearchAdDraft = { title: "", description: "", url: "", backgroundImageUrl: "", logoUrl: "", label: "广告", keywords: "", content: [{ ...emptyRichTextSegment }], global: false, startsAt: "", endsAt: "", active: true, clearBackgroundImage: false, clearLogo: false };
 const emptyManualGatewayDraft: ManualGatewayDraft = { name: "", url: "", logoUrl: "", description: "", modelTags: "", pricingClaims: "", displayGroupId: "" };
 
@@ -95,13 +103,20 @@ export function AdminIngestion() {
   const [announcement, setAnnouncement] = useState<Announcement | null>(null);
   const [productBackfill, setProductBackfill] = useState<ProductBackfillStatus | null>(null);
   const [bots, setBots] = useState<BotAdminOverview | null>(null);
+  const [placementConfig, setPlacementConfig] = useState<PlacementConfig[]>([]);
+  const [paymentProviderConfig, setPaymentProviderConfig] = useState<PaymentProviderConfig | null>(null);
+  const [placementOrders, setPlacementOrders] = useState<PlacementOrder[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [newHotSearch, setNewHotSearch] = useState("");
   const [page, setPage] = useState(1);
+  // Show every source initially so newly enabled public feeds are visible in
+  // the review queue instead of looking like they produced no data.
+  const [candidateSource, setCandidateSource] = useState("all");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [unauthorized, setUnauthorized] = useState(false);
+  const [operatorRole, setOperatorRole] = useState<"moderator" | "admin" | null>(null);
 
   const request = useCallback<AdminRequest>(async (path, init) => {
     const response = await fetch(`/api/v1/admin${path}`, { credentials: "include", ...init });
@@ -121,8 +136,9 @@ export function AdminIngestion() {
         setError("");
         return;
       }
-      const [candidatePage, submissionPageData, sourceList, runList, hotList, searchAdList, gatewayList, gatewayDirectoryPage, projectList, settings, announcementConfig, banner, sideAdList, backfill, botOverview] = await Promise.all([
-        request<CandidatePage>(`/candidates?status=pending&source=ldxp&pageSize=50&page=${page}`),
+      setOperatorRole(session.user.role as "moderator" | "admin");
+      const [candidatePage, submissionPageData, sourceList, runList, hotList, searchAdList, gatewayList, gatewayDirectoryPage, projectList, settings, announcementConfig, banner, sideAdList, backfill, botOverview, providerConfig, paymentConfig, paymentOrders] = await Promise.all([
+        request<CandidatePage>(`/candidates?status=pending${candidateSource === "all" ? "" : `&source=${encodeURIComponent(candidateSource)}`}&pageSize=50&page=${page}`),
         request<SubmissionPage>(`/submissions?kind=${submissionKind}&status=${submissionStatus}&pageSize=30&page=${submissionPage}`),
         request<Source[]>("/sources"), request<Run[]>("/runs"), request<HotSearch[]>("/hot-searches"),
         request<SearchAd[]>("/search-ads"),
@@ -131,10 +147,12 @@ export function AdminIngestion() {
         request<Listing[]>("/listings?type=project"),
         request<SiteSettings>("/site-settings"), request<Announcement>("/announcement"), request<AdminHomeBanner>("/home-banner"), request<AdminSideAd[]>("/side-ads"), request<ProductBackfillStatus>("/sources/ldxp/product-backfill"),
         request<BotAdminOverview>("/bots"),
+        request<PaymentProviderConfig>("/placements/payment-config"),
+        request<PlacementConfig[]>("/placements/config"), request<PlacementOrder[]>("/placements/orders"),
       ]);
-      setCandidates(candidatePage); setSubmissions(submissionPageData); setSources(sourceList); setRuns(runList); setHotSearches(hotList); setSearchAds(searchAdList); setGateways(gatewayList); setGatewayDirectory(gatewayDirectoryPage); setProjects(projectList); setSiteSettings(settings); setAnnouncement(announcementConfig); setHomeBanner(banner); setSideAds(sideAdList); setProductBackfill(backfill); setBots(botOverview); setUnauthorized(false); setError("");
+      setCandidates(candidatePage); setSubmissions(submissionPageData); setSources(sourceList); setRuns(runList); setHotSearches(hotList); setSearchAds(searchAdList); setGateways(gatewayList); setGatewayDirectory(gatewayDirectoryPage); setProjects(projectList); setSiteSettings(settings); setAnnouncement(announcementConfig); setHomeBanner(banner); setSideAds(sideAdList); setProductBackfill(backfill); setBots(botOverview); setPaymentProviderConfig(providerConfig); setPlacementConfig(paymentConfig); setPlacementOrders(paymentOrders); setUnauthorized(false); setError("");
     } catch (requestError) { setError(requestError instanceof Error ? requestError.message : "加载失败"); }
-  }, [page, gatewayGroupFilter, gatewayPage, gatewayReviewStatus, request, submissionKind, submissionPage, submissionStatus]);
+  }, [candidateSource, page, gatewayGroupFilter, gatewayPage, gatewayReviewStatus, request, submissionKind, submissionPage, submissionStatus]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
@@ -156,8 +174,8 @@ export function AdminIngestion() {
   return <main className="admin-console">
     <aside className="admin-sidebar" aria-label="后台模块导航">
       <div className="admin-sidebar-brand"><span><SidebarSimple /></span><div><strong>{siteSettings?.siteName || "AI卡网"}后台</strong><small>运营管理系统</small></div></div>
-      <nav>{sections.map(({ key, label, Icon }) => <button type="button" key={key} className={active === key ? "is-active" : ""} aria-current={active === key ? "page" : undefined} onClick={() => setActive(key)}><Icon /><span>{label}</span>{key === "submissions" && Boolean(submissions?.pending) && <b className="admin-nav-count">{submissions?.pending}</b>}</button>)}</nav>
-      <div className="admin-sidebar-foot"><span className="source-state active">链动小店</span><small>唯一采集来源</small></div>
+      <nav>{sections.filter((item) => !("adminOnly" in item && item.adminOnly) || operatorRole === "admin").map(({ key, label, Icon }) => <button type="button" key={key} className={active === key ? "is-active" : ""} aria-current={active === key ? "page" : undefined} onClick={() => setActive(key)}><Icon /><span>{label}</span>{key === "submissions" && Boolean(submissions?.pending) && <b className="admin-nav-count">{submissions?.pending}</b>}</button>)}</nav>
+      <div className="admin-sidebar-foot"><span className="source-state active">3 个来源</span><small>链动小店 + 公开目录</small></div>
     </aside>
 
     <section className="admin-workspace">
@@ -169,10 +187,12 @@ export function AdminIngestion() {
       {active === "announcement" && <AnnouncementPanel announcement={announcement} busy={busy} request={request} act={act} />}
       {active === "banner" && <HomeBannerPanel banner={homeBanner} sideAds={sideAds} busy={busy} request={request} act={act} />}
       {active === "source" && <SourcePanel sources={sources} runs={runs} productBackfill={productBackfill} busy={busy} request={request} act={act} />}
-      {active === "candidates" && <CandidatesPanel candidates={candidates} selected={selected} setSelected={setSelected} page={page} setPage={setPage} busy={busy} request={request} act={act} />}
+      {active === "candidates" && <CandidatesPanel candidates={candidates} selected={selected} setSelected={setSelected} page={page} setPage={setPage} sourceFilter={candidateSource} setSourceFilter={(value) => { setCandidateSource(value); setPage(1); }} sources={sources} busy={busy} request={request} act={act} />}
       {active === "submissions" && <SubmissionPanel data={submissions} kind={submissionKind} setKind={setSubmissionKind} status={submissionStatus} setStatus={setSubmissionStatus} page={submissionPage} setPage={setSubmissionPage} groups={gatewayDirectory?.displayGroups || []} busy={busy} request={request} act={act} />}
       {active === "searches" && <HotSearchPanel items={hotSearches} newTerm={newHotSearch} setNewTerm={setNewHotSearch} busy={busy} request={request} act={act} />}
       {active === "ads" && <SearchAdPanel items={searchAds} busy={busy} request={request} act={act} />}
+      {active === "placements" && <PlacementAdminPanel config={placementConfig} orders={placementOrders} paymentProviderConfig={paymentProviderConfig} busy={busy} request={request} act={act} />}
+      {active === "users" && operatorRole === "admin" && <UserAdminPanel request={request} />}
       {active === "gateways" && <><GatewayDirectoryPanel data={gatewayDirectory} notice={siteSettings?.gatewayNotice || null} status={gatewayReviewStatus} setStatus={setGatewayReviewStatus} groupFilter={gatewayGroupFilter} setGroupFilter={setGatewayGroupFilter} selected={gatewaySelected} setSelected={setGatewaySelected} page={gatewayPage} setPage={setGatewayPage} busy={busy} request={request} act={act} /><ListingPanel type="gateway" title="中转站赞助位" items={gateways} busy={busy} request={request} act={act} /></>}
       {active === "projects" && <ListingPanel type="project" title="热门项目" items={projects} busy={busy} request={request} act={act} />}
       {active === "bots" && <BotAdminPanel data={bots} busy={busy} request={request} act={act} />}
@@ -391,7 +411,7 @@ function SideAdEditor({ slot, item, busy, request, act }: { slot: SideAdSlot; it
 }
 
 function SourcePanel({ sources, runs, productBackfill, busy, request, act }: { sources: Source[]; runs: Run[]; productBackfill: ProductBackfillStatus | null; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
-  const source = sources[0];
+  const source = sources.find((item) => item.key === "ldxp");
   const [enabled, setEnabled] = useState(false);
   const [intervalMinutes, setIntervalMinutes] = useState("360");
   const [discoveryPages, setDiscoveryPages] = useState("20");
@@ -400,11 +420,11 @@ function SourcePanel({ sources, runs, productBackfill, busy, request, act }: { s
   useEffect(() => {
     if (!source) return;
     setEnabled(source.enabled);
-    setIntervalMinutes(String(Math.max(30, Math.round(source.pollIntervalSeconds / 60) || 360)));
+    setIntervalMinutes(String(Math.max(10, Math.round(source.pollIntervalSeconds / 60) || 360)));
   }, [source]);
   const latestRun = runs.find((run) => run.dataSource.name.includes("链动"));
   return <div className="admin-module">
-    <section className="admin-panel source-focus"><div className="source-focus-icon"><Database /></div><div><span className="kicker">唯一数据来源</span><h2>{source?.name || "链动小店"}</h2><p>从 211b 已授权公开目录发现链动店铺、分类和商品，保存链动原始链接；前台购买统一通过本站安全跳转。</p><dl><div><dt>目录来源</dt><dd>211b.site/shops</dd></div><div><dt>购买目标</dt><dd>pay.ldxp.cn</dd></div><div><dt>最近成功</dt><dd>{source?.lastSuccessAt ? formatTime(source.lastSuccessAt) : "等待首次同步"}</dd></div><div><dt>最近批次</dt><dd>{latestRun?.status || "暂无"}</dd></div></dl></div></section>
+    <section className="admin-panel source-focus"><div className="source-focus-icon"><Database /></div><div><span className="kicker">主数据来源</span><h2>{source?.name || "链动小店"}</h2><p>从 211b 公开目录发现链动店铺、分类和商品，保存链动原始链接；Cardnav 配置位于下方。</p><dl><div><dt>目录来源</dt><dd>211b.site/shops</dd></div><div><dt>购买目标</dt><dd>pay.ldxp.cn</dd></div><div><dt>最近成功</dt><dd>{source?.lastSuccessAt ? formatTime(source.lastSuccessAt) : "等待首次同步"}</dd></div><div><dt>最近批次</dt><dd>{latestRun?.status || "暂无"}</dd></div></dl></div></section>
     <section className="admin-panel source-discovery-panel"><div className="admin-section-head"><div><span className="kicker"><MagnifyingGlass />店铺发现</span><h2>扫描 211b 店铺目录</h2></div><small className="admin-muted">扫描完成后自动排队补全新店商品</small></div>
       <form className="source-discovery-form" onSubmit={(event) => { event.preventDefault(); void act("source-discover-211b", async () => {
         const result = await request<DiscoveryResult>("/sources/ldxp/discover-211b", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxPages: Number(discoveryPages), syncProducts: false }) });
@@ -445,19 +465,44 @@ function SourcePanel({ sources, runs, productBackfill, busy, request, act }: { s
         <div className="source-backfill-actions"><button className="button dark" type="submit" disabled={Boolean(busy) || Boolean(productBackfill?.activeRun) || !productBackfill?.remainingShops}>{busy === "source-product-backfill" || productBackfill?.activeRun ? <ArrowsClockwise className="spin" /> : <Play />}{productBackfill?.activeRun ? "正在补全" : productBackfill?.remainingShops ? "补全未采集店铺" : "已完成首次补全"}</button><button className="button ghost" type="button" disabled={Boolean(busy) || Boolean(productBackfill?.activeRun) || !productBackfill?.totalShops} onClick={() => void act("source-product-refresh", () => request("/sources/ldxp/product-backfill", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ batchSize: Number(backfillBatchSize), refreshAll: true }) }), "全部店铺刷新任务已启动")}><ArrowsClockwise />刷新全部店铺</button></div>
       </form>
     </section>
-    <section className="admin-panel source-schedule-panel"><div className="admin-section-head"><div><span className="kicker"><Timer />自动更新</span><h2>采集计划</h2></div><span className={source?.enabled ? "source-state active" : "source-state manual"}>{source?.enabled ? "运行中" : "已停用"}</span></div>
+    <section className="admin-panel source-schedule-panel"><div className="admin-section-head"><div><span className="kicker"><Timer />自动更新</span><h2>链动小店采集计划</h2></div><span className={source?.enabled ? "source-state active" : "source-state manual"}>{source?.enabled ? "运行中" : "已停用"}</span></div>
       <form className="source-schedule-form" onSubmit={(event) => { event.preventDefault(); void act("source-schedule", () => request("/sources/ldxp/schedule", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled, intervalMinutes: Number(intervalMinutes) }) }), enabled ? "自动采集计划已保存" : "自动采集已停用"); }}>
         <label className="source-schedule-toggle"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span aria-hidden="true" /><strong>启用自动采集</strong><small>Worker 每分钟检查一次，到达设定间隔后执行更新。</small></label>
-        <label><span>采集间隔</span><select value={intervalMinutes} onChange={(event) => setIntervalMinutes(event.target.value)} disabled={!enabled}><option value="30">30 分钟</option><option value="60">1 小时</option><option value="180">3 小时</option><option value="360">6 小时</option><option value="720">12 小时</option><option value="1440">24 小时</option></select></label>
+        <label><span>采集间隔</span><select value={intervalMinutes} onChange={(event) => setIntervalMinutes(event.target.value)} disabled={!enabled}><option value="10">10 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option><option value="180">3 小时</option><option value="360">6 小时</option><option value="720">12 小时</option><option value="1440">24 小时</option></select></label>
         <div className="source-next-run"><span>下一次计划运行</span><strong>{source?.enabled && source.nextRunAt ? formatTime(source.nextRunAt) : "未安排"}</strong><small>{source?.lastCheckedAt ? `最近检查 ${formatTime(source.lastCheckedAt)}` : "尚未执行"}</small></div>
         <div className="source-schedule-actions"><button className="button dark" type="submit" disabled={Boolean(busy)}>保存设置</button><button className="button ghost" type="button" disabled={Boolean(busy)} onClick={() => void act("source-sync-now", () => request("/sources/ldxp/sync", { method: "POST" }), "同步任务已进入队列，Worker 将在一分钟内开始执行")}><Play />立即同步</button></div>
       </form>
       <p className="source-schedule-note"><WarningCircle />完整同步只读取 211b 公开目录，按固定速率逐店执行；项目仅保存并校验链动原始购买链接，不主动请求商品详情页。</p>
     </section>
+    <PublicCatalogSources sources={sources} busy={busy} request={request} act={act} />
   </div>;
 }
 
-function CandidatesPanel({ candidates, selected, setSelected, page, setPage, busy, request, act }: { candidates: CandidatePage | null; selected: Set<string>; setSelected: (value: Set<string>) => void; page: number; setPage: (value: number | ((current: number) => number)) => void; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
+function PublicCatalogSources({ sources, busy, request, act }: { sources: Source[]; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
+  const publicSources = sources.filter((source) => source.key === "cardnav");
+  return <section className="admin-panel source-schedule-panel">
+    <div className="admin-section-head"><div><span className="kicker"><Database />公开目录同步</span><h2>Cardnav 卡网大全</h2><p className="admin-muted">读取完整公开目录。新数据先进入候选审核，已收录同地址店铺按商品链接去重更新。</p></div><span className="source-state manual">需审核发布</span></div>
+    <div className="source-catalog-grid">{publicSources.map((source) => <PublicCatalogSourceCard key={source.key} source={source} busy={busy} request={request} act={act} />)}</div>
+    {!publicSources.length && <div className="admin-empty compact"><Database /><strong>来源尚未初始化</strong></div>}
+  </section>;
+}
+
+function PublicCatalogSourceCard({ source, busy, request, act }: { source: Source; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
+  const [enabled, setEnabled] = useState(source.enabled);
+  const [intervalMinutes, setIntervalMinutes] = useState(String(Math.max(10, Math.round(source.pollIntervalSeconds / 60) || 360)));
+  useEffect(() => { setEnabled(source.enabled); setIntervalMinutes(String(Math.max(10, Math.round(source.pollIntervalSeconds / 60) || 360))); }, [source.enabled, source.pollIntervalSeconds]);
+  return <article className="source-catalog-card">
+    <div className="admin-section-head"><div><span className="kicker">CARDNAV.XYZ</span><h3>{source.name}</h3></div><span className={source.enabled ? "source-state active" : "source-state manual"}>{source.enabled ? "运行中" : "已停用"}</span></div>
+    <dl className="source-catalog-meta"><div><dt>公开接口</dt><dd>/api/shop-products.json</dd></div><div><dt>最近成功</dt><dd>{source.lastSuccessAt ? formatTime(source.lastSuccessAt) : "尚未同步"}</dd></div><div><dt>下一次</dt><dd>{source.enabled && source.nextRunAt ? formatTime(source.nextRunAt) : "未安排"}</dd></div></dl>
+    <form className="source-schedule-form" onSubmit={(event) => { event.preventDefault(); void act(`source-schedule-${source.key}`, () => request(`/sources/${source.key}/schedule`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled, intervalMinutes: Number(intervalMinutes) }) }), enabled ? `${source.name}自动采集已启用` : `${source.name}自动采集已停用`); }}>
+      <label className="source-schedule-toggle"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span aria-hidden="true" /><strong>启用自动采集</strong><small>Worker 每分钟检查，到点才请求一次。</small></label>
+      <label><span>更新频率</span><select value={intervalMinutes} onChange={(event) => setIntervalMinutes(event.target.value)} disabled={!enabled}><option value="60">1 小时</option><option value="180">3 小时</option><option value="360">6 小时</option><option value="720">12 小时</option><option value="1440">24 小时</option></select></label>
+      <div className="source-schedule-actions"><button className="button dark" type="submit" disabled={Boolean(busy)}>{busy === `source-schedule-${source.key}` ? <ArrowsClockwise className="spin" /> : <CheckCircle />}保存设置</button><button className="button ghost" type="button" disabled={Boolean(busy)} onClick={() => void act(`source-sync-${source.key}`, () => request(`/sources/${source.key}/sync`, { method: "POST" }), `${source.name}同步任务已进入队列`)}><Play />立即同步</button></div>
+    </form>
+  </article>;
+}
+
+function CandidatesPanel({ candidates, selected, setSelected, page, setPage, sourceFilter, setSourceFilter, sources, busy, request, act }: { candidates: CandidatePage | null; selected: Set<string>; setSelected: (value: Set<string>) => void; page: number; setPage: (value: number | ((current: number) => number)) => void; sourceFilter: string; setSourceFilter: (value: string) => void; sources: Source[]; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
   const decide = (id: string, action: "approve" | "reject") => request(`/candidates/${id}/decision`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action }) });
   const pageIds = useMemo(() => candidates?.items.map((candidate) => candidate.id) || [], [candidates]);
   const selectedOnPage = pageIds.filter((id) => selected.has(id)).length;
@@ -469,13 +514,13 @@ function CandidatesPanel({ candidates, selected, setSelected, page, setPage, bus
     setSelected(next);
   }
   return <div className="admin-module"><section className="admin-panel">
-    <div className="admin-section-head"><div><span className="kicker">链动小店</span><h2>待审核店铺</h2></div><div className="candidate-bulk"><span>已选 {selected.size} 家</span><button className="button ghost compact" disabled={!pageIds.length || Boolean(busy)} type="button" onClick={toggleCurrentPage}>{allSelectedOnPage ? "取消本页" : "全选本页"}</button><button className="button dark compact" disabled={!selected.size || Boolean(busy)} type="button" onClick={() => void act("batch-approve", () => request("/candidates/batch-decision", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [...selected], action: "approve" }) }), "批量批准完成")}>批量批准</button></div></div>
+    <div className="admin-section-head"><div><span className="kicker">公开来源候选</span><h2>待审核店铺</h2></div><div className="candidate-bulk"><label><span className="visually-hidden">候选来源</span><select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}><option value="all">全部来源</option>{sources.map((source) => <option key={source.key} value={source.key}>{source.name}</option>)}</select></label><span>已选 {selected.size} 家</span><button className="button ghost compact" disabled={!pageIds.length || Boolean(busy)} type="button" onClick={toggleCurrentPage}>{allSelectedOnPage ? "取消本页" : "全选本页"}</button><button className="button dark compact" disabled={!selected.size || Boolean(busy)} type="button" onClick={() => void act("batch-approve", () => request("/candidates/batch-decision", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [...selected], action: "approve" }) }), "批量批准完成")}>批量批准</button></div></div>
     <div className="candidate-list">{candidates?.items.map((candidate) => <article className="candidate-row simple" key={candidate.id}>
       <label className="candidate-check"><input type="checkbox" checked={selected.has(candidate.id)} onChange={(event) => { const next = new Set(selected); event.target.checked ? next.add(candidate.id) : next.delete(candidate.id); setSelected(next); }} /><span className="visually-hidden">选择 {candidate.name}</span></label>
       <MediaThumbnail value={candidate.logoUrl} label={candidate.name} kind="shop" />
-      <div className="candidate-main"><strong>{candidate.name}</strong><small>{candidate._count.offerCandidates} 条候选报价 · 首次发现 {formatTime(candidate.firstSeenAt)}</small><span className="candidate-source-links"><a href={candidate.directoryUrl} target="_blank" rel="noreferrer">查看 211b 来源页 <Eye /></a>{candidate.homepageUrl && <a href={candidate.homepageUrl} target="_blank" rel="noreferrer">查看链动原店 <Eye /></a>}</span></div>
+      <div className="candidate-main"><strong>{candidate.name}</strong><small>{candidate._count.offerCandidates} 条候选报价 · {candidate.dataSource.name} · 首次发现 {formatTime(candidate.firstSeenAt)}</small><span className="candidate-source-links"><a href={candidate.directoryUrl} target="_blank" rel="noreferrer">查看来源页 <Eye /></a>{candidate.homepageUrl && <a href={candidate.homepageUrl} target="_blank" rel="noreferrer">查看店铺 <Eye /></a>}</span></div>
       <div className="candidate-actions"><button className="button dark compact" type="button" disabled={Boolean(busy)} onClick={() => void act(`approve-${candidate.id}`, () => decide(candidate.id, "approve"), `${candidate.name} 已批准并认证`)}><CheckCircle />批准</button><button className="icon-button danger" type="button" disabled={Boolean(busy)} aria-label={`拒绝 ${candidate.name}`} title="拒绝候选" onClick={() => void act(`reject-${candidate.id}`, () => decide(candidate.id, "reject"), `${candidate.name} 已拒绝`)}><XCircle /></button></div>
-    </article>)}{candidates && !candidates.items.length && <div className="admin-empty"><CheckCircle /><strong>没有待审候选</strong><span>当前链动小店候选已处理完成。</span></div>}</div>
+    </article>)}{candidates && !candidates.items.length && <div className="admin-empty"><CheckCircle /><strong>没有待审候选</strong><span>{sourceFilter === "all" ? "当前所有来源候选已处理完成。" : `当前${sources.find((source) => source.key === sourceFilter)?.name || "该来源"}候选已处理完成。`}</span></div>}</div>
     {candidates && candidates.totalPages > 1 && <nav className="admin-pagination" aria-label="候选店铺分页"><button className="button ghost compact" type="button" disabled={page <= 1 || Boolean(busy)} onClick={() => setPage((current) => Math.max(1, current - 1))}>上一页</button><span>第 {candidates.page} / {candidates.totalPages} 页</span><button className="button ghost compact" type="button" disabled={page >= candidates.totalPages || Boolean(busy)} onClick={() => setPage((current) => current + 1)}>下一页</button></nav>}
   </section></div>;
 }
@@ -606,6 +651,7 @@ function SearchAdPanel({ items, busy, request, act }: { items: SearchAd[]; busy:
     <button className="button dark" type="submit" disabled={Boolean(busy)}>{editingId ? <CheckCircle /> : <Plus />}{editingId ? "保存搜索广告" : "添加搜索广告"}</button>{editingId && <button className="button ghost" type="button" disabled={Boolean(busy)} onClick={reset}><XCircle />取消编辑</button>}
   </form></section><section className="admin-panel"><div className="admin-section-head"><div><span className="kicker">展示顺序</span><h2>已添加搜索广告</h2></div><span className="result-summary">{items.filter((item) => item.active).length} 个启用</span></div><div className="search-ad-admin-list">{items.map((item, index) => <article className={item.active ? "search-ad-admin-row" : "search-ad-admin-row is-disabled"} key={item.id}><div className="search-ad-admin-media">{item.backgroundImageUrl || item.imageUrl ? <img src={item.backgroundImageUrl || item.imageUrl || ""} alt="" /> : <span className="search-ad-admin-thumb"><Tag /></span>}{item.logoUrl && <img className="search-ad-admin-logo" src={item.logoUrl} alt="" />}</div><div><strong>{item.title}<span>{item.label}</span></strong><small>{item.global ? "全局展示" : item.keywords.join("，")}</small><p>{item.description || item.url}</p><dl><div><dt>曝光</dt><dd>{item.impressionCount}</dd></div><div><dt>点击</dt><dd>{item.clickCount}</dd></div><div><dt>有效期</dt><dd>{item.startsAt || item.endsAt ? `${item.startsAt ? formatTime(item.startsAt) : "立即"} - ${item.endsAt ? formatTime(item.endsAt) : "长期"}` : "长期"}</dd></div></dl></div><span className={item.active ? "source-state active" : "source-state manual"}>{item.active ? "展示中" : "已停用"}</span><div className="admin-listing-actions"><button className="icon-button" type="button" title="编辑" aria-label={`编辑 ${item.title}`} disabled={Boolean(busy)} onClick={() => edit(item)}><Pencil /></button><button className="icon-button" type="button" aria-label={`上移 ${item.title}`} disabled={index === 0 || Boolean(busy)} onClick={() => void act(`search-ad-up-${item.id}`, () => reorder(index, -1), "广告顺序已更新")}><ArrowUp /></button><button className="icon-button" type="button" aria-label={`下移 ${item.title}`} disabled={index === items.length - 1 || Boolean(busy)} onClick={() => void act(`search-ad-down-${item.id}`, () => reorder(index, 1), "广告顺序已更新")}><ArrowDown /></button><button className="icon-button danger" type="button" aria-label={`${item.active ? "停用" : "启用"} ${item.title}`} disabled={Boolean(busy)} onClick={() => void act(`search-ad-toggle-${item.id}`, () => request(`/search-ads/${item.id}/toggle`, { method: "POST" }), `搜索广告已${item.active ? "停用" : "启用"}`)}>{item.active ? <EyeSlash /> : <Eye />}</button></div></article>)}{!items.length && <div className="admin-empty compact"><Tag /><strong>尚未添加搜索广告</strong><span>添加后会根据关键词或全局规则出现在搜索结果顶部。</span></div>}</div></section></div>;
 }
+
 
 function GatewayDirectoryPanel({
   data, notice, status, setStatus, groupFilter, setGroupFilter, selected, setSelected, page, setPage, busy, request, act,
@@ -795,7 +841,7 @@ function GatewayDirectoryPanel({
 }
 
 function LegacyListingPanel({ type, title, items, busy, request, act }: { type: "gateway" | "project"; title: string; items: Listing[]; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
-  const [draft, setDraft] = useState<ListingDraft>(emptyListingDraft);
+  const [draft, setDraft] = useState<ListingDraft>(() => createListingDraft(type));
   const [editingId, setEditingId] = useState<string | null>(null);
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [clearThumbnail, setClearThumbnail] = useState(false);
@@ -805,10 +851,10 @@ function LegacyListingPanel({ type, title, items, busy, request, act }: { type: 
   const editingItem = editingId ? items.find((item) => item.id === editingId) || null : null;
   const preview = useObjectPreview(thumbnail, clearThumbnail ? null : (draft.thumbnailUrl || editingItem?.thumbnailUrl || null));
   function update(field: keyof ListingDraft, value: string) { setDraft((current) => ({ ...current, [field]: value })); }
-  function resetForm() { setDraft(emptyListingDraft); setEditingId(null); setThumbnail(null); setClearThumbnail(false); setImageError(""); }
+  function resetForm() { setDraft(createListingDraft(type)); setEditingId(null); setThumbnail(null); setClearThumbnail(false); setImageError(""); }
   function beginEdit(item: Listing) {
     setEditingId(item.id);
-    setDraft({ title: item.title, description: item.description, url: item.url, thumbnailUrl: item.thumbnailUrl?.startsWith("https://") ? item.thumbnailUrl : "", badge: item.badge || "", modelTags: item.modelTags.join(", "), pricingClaims: item.pricingClaims || "" });
+    setDraft({ title: item.title, description: item.description, url: item.url, thumbnailUrl: item.thumbnailUrl?.startsWith("https://") ? item.thumbnailUrl : "", badge: item.badge || "", modelTags: item.modelTags.join(", "), pricingClaims: item.pricingClaims || "", gatewayPlacement: item.gatewayPlacement, homeSideSlot: item.homeSideSlot || "", homeBottomPlacement: item.homeBottomPlacement });
     setThumbnail(null); setClearThumbnail(false); setImageError("");
     window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
@@ -834,17 +880,134 @@ function LegacyListingPanel({ type, title, items, busy, request, act }: { type: 
   return <div className="admin-module"><section className={editingId ? "admin-panel listing-editor is-editing" : "admin-panel listing-editor"}><div className="admin-section-head"><div><span className="kicker">前台展示</span><h2>{editingId ? `编辑${title}` : `添加${title}`}</h2></div><small className="admin-muted">{isSponsor ? "支持本地上传或 HTTPS 图片，建议使用 3:1 横幅图" : "仅接受 HTTPS 官网与图片链接"}</small></div><form ref={formRef} className="listing-admin-form" onSubmit={submit}><label><span>{isSponsor ? "赞助商名称" : "名称"}</span><input required maxLength={100} value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder={isSponsor ? "例如：示例 API" : `${title}名称`} /></label><label><span>{isSponsor ? "优惠标签（选填）" : "标签"}</span><input maxLength={30} value={draft.badge} onChange={(event) => update("badge", event.target.value)} placeholder={isSponsor ? "例如：注册送额度" : "推荐 / 热门"} /></label><label className="wide"><span>{isSponsor ? "赞助落地页" : "官网链接"}</span><input required type="url" value={draft.url} onChange={(event) => update("url", event.target.value)} placeholder="https://example.com" /></label><label className="wide"><span>{isSponsor ? "横幅图 URL（选填）" : "缩略图 URL"}</span><input type="url" value={draft.thumbnailUrl} onChange={(event) => { setThumbnail(null); setClearThumbnail(false); update("thumbnailUrl", event.target.value); }} placeholder={isSponsor ? "也可以粘贴 HTTPS 图片地址" : "https://example.com/cover.webp"} /></label>{isSponsor && <div className="listing-image-upload full"><div className="listing-image-preview">{preview ? <img src={preview} alt="赞助横幅预览" /> : <ImageSquare aria-hidden="true" />}</div><div><strong>本地横幅图片</strong><p>PNG、JPEG 或 WebP，最大 5 MB。上传新图会替换当前图片。</p><div><label className="button ghost compact"><UploadSimple />选择本地图片<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectThumbnail(event.target.files?.[0] || null)} /></label>{preview && <button className="button ghost compact danger" type="button" onClick={() => { setThumbnail(null); setClearThumbnail(true); update("thumbnailUrl", ""); }}><XCircle />移除图片</button>}</div>{thumbnail && <small>{thumbnail.name}</small>}{imageError && <small className="field-error" role="alert">{imageError}</small>}</div></div>}<label className="full"><span>{isSponsor ? "赞助简介" : "展示说明"}</span><textarea maxLength={500} rows={3} value={draft.description} onChange={(event) => update("description", event.target.value)} placeholder={isSponsor ? "简要介绍服务与主要优势" : "简要说明服务特点和适用场景"} /></label><div className="listing-form-actions"><button className="button dark" type="submit" disabled={Boolean(busy) || Boolean(imageError)}>{editingId ? <CheckCircle /> : <Plus />}{editingId ? "保存修改" : isSponsor ? "添加赞助位" : "添加到展示"}</button>{editingId && <button className="button ghost" type="button" disabled={Boolean(busy)} onClick={resetForm}><XCircle />取消编辑</button>}</div></form></section><section className="admin-panel"><div className="admin-section-head"><div><span className="kicker">展示顺序</span><h2>已添加{title}</h2></div><span className="result-summary">{items.filter((item) => item.active).length} 个启用</span></div><div className="admin-listing-list">{items.map((item, index) => <article className={`${item.active ? "admin-listing-row" : "admin-listing-row is-disabled"}${editingId === item.id ? " is-editing" : ""}`} key={item.id}><MediaThumbnail value={item.thumbnailUrl} label={item.title} kind="listing" /><div><strong>{item.title}{item.badge && <span>{item.badge}</span>}</strong><small>{item.url}</small><p>{item.description || "暂无说明"}</p></div><span className={item.active ? "source-state active" : "source-state manual"}>{item.active ? "展示中" : "已停用"}</span><div className="admin-listing-actions"><button className="icon-button" type="button" title="编辑" aria-label={`编辑 ${item.title}`} disabled={Boolean(busy)} onClick={() => beginEdit(item)}><Pencil /></button><button className="icon-button" type="button" title="上移" aria-label={`上移 ${item.title}`} disabled={index === 0 || Boolean(busy)} onClick={() => void act(`listing-up-${item.id}`, () => reorder(index, -1), "展示顺序已更新")}><ArrowUp /></button><button className="icon-button" type="button" title="下移" aria-label={`下移 ${item.title}`} disabled={index === items.length - 1 || Boolean(busy)} onClick={() => void act(`listing-down-${item.id}`, () => reorder(index, 1), "展示顺序已更新")}><ArrowDown /></button><button className="icon-button danger" type="button" title={item.active ? "停用" : "启用"} aria-label={`${item.active ? "停用" : "启用"} ${item.title}`} disabled={Boolean(busy)} onClick={() => void act(`listing-toggle-${item.id}`, () => request(`/listings/${item.id}/toggle`, { method: "POST" }), `${title}已${item.active ? "停用" : "启用"}`)}>{item.active ? <EyeSlash /> : <Eye />}</button></div></article>)}{!items.length && <div className="admin-empty compact"><Tag /><strong>尚未添加{title}</strong><span>填写上方表单后会进入展示列表。</span></div>}</div></section></div>;
 }
 
+function PaymentProviderPanel({ config, busy, request, act }: { config: PaymentProviderConfig | null; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
+  if (!config) return <section className="admin-panel payment-provider-panel"><div className="admin-section-head"><div><span className="kicker">支付通道</span><h2>易支付设置</h2></div><span className="admin-muted">读取中</span></div></section>;
+  return <PaymentProviderEditor config={config} busy={busy} request={request} act={act} />;
+}
+
+function PaymentProviderEditor({ config, busy, request, act }: { config: PaymentProviderConfig; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
+  const [draft, setDraft] = useState({ apiUrl: config.apiUrl || "", pid: config.pid || "", key: "", type: config.type || "alipay", orderTimeoutMinutes: String(config.orderTimeoutMinutes || 30), clearKey: false });
+  useEffect(() => setDraft({ apiUrl: config.apiUrl || "", pid: config.pid || "", key: "", type: config.type || "alipay", orderTimeoutMinutes: String(config.orderTimeoutMinutes || 30), clearKey: false }), [config]);
+  const save = () => void act("payment-provider-config", async () => { await request("/placements/payment-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...draft, orderTimeoutMinutes: Number(draft.orderTimeoutMinutes) }) }); }, "易支付配置已保存");
+  return <section className="admin-panel payment-provider-panel"><div className="admin-section-head"><div><span className="kicker">支付通道</span><h2>易支付设置</h2></div><span className={config.configured ? "source-state active" : "source-state manual"}>{config.configured ? "已配置" : "未配置"}</span></div><p className="payment-provider-note">可直接在此保存配置，无需修改服务器环境变量。密钥只保存加密值，后台不会回显；{config.keyConfigured ? <>当前密钥末四位 <code>{config.keyLastFour || "****"}</code>。</> : "当前尚未设置商户密钥。"}</p><div className="payment-provider-form"><div className="payment-provider-form-grid"><label className="full">易支付接口地址<input type="url" value={draft.apiUrl} onChange={(event) => setDraft((value) => ({ ...value, apiUrl: event.target.value }))} placeholder="https://pay.example.com" /></label><label>商户 PID<input value={draft.pid} onChange={(event) => setDraft((value) => ({ ...value, pid: event.target.value }))} /></label><label>支付类型<select value={draft.type} onChange={(event) => setDraft((value) => ({ ...value, type: event.target.value }))}><option value="alipay">支付宝</option><option value="wxpay">微信支付</option></select></label><label>默认订单超时时间（分钟）<input type="number" min="5" max="1440" value={draft.orderTimeoutMinutes} onChange={(event) => setDraft((value) => ({ ...value, orderTimeoutMinutes: event.target.value }))} /></label><label>商户密钥<input type="password" autoComplete="new-password" value={draft.key} onChange={(event) => setDraft((value) => ({ ...value, key: event.target.value, clearKey: false }))} placeholder={config.keyConfigured ? "留空表示保留当前密钥" : "请输入商户密钥"} /></label></div><label className="payment-provider-clear"><input type="checkbox" checked={draft.clearKey} onChange={(event) => setDraft((value) => ({ ...value, clearKey: event.target.checked, key: "" }))} />清除当前密钥</label><div className="payment-provider-actions"><button className="button dark compact" type="button" disabled={Boolean(busy)} onClick={save}><CheckCircle />保存易支付配置</button></div></div><div className="payment-provider-grid"><div><span>异步通知地址</span><strong>{config.notifyUrl}</strong></div><div><span>同步返回地址</span><strong>{config.returnUrl}</strong></div></div>{config.missing.length > 0 && <p className="payment-provider-missing"><WarningCircle />缺少配置：{config.missing.join("、")}。未完成配置时，新订单会保持“待付款”，不会进入审核。</p>}</section>;
+}
+
+function PlacementAdminPanel({ config, orders, paymentProviderConfig, busy, request, act }: { config: PlacementConfig[]; orders: PlacementOrder[]; paymentProviderConfig: PaymentProviderConfig | null; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
+  const [draft, setDraft] = useState<PlacementConfig[]>(config);
+  useEffect(() => setDraft(config), [config]);
+  function update(key: string, field: keyof PlacementConfig, value: string | boolean) { setDraft((current) => current.map((item) => item.key === key ? { ...item, [field]: field === "dailyPrice" || field === "minDays" || field === "maxDays" || field === "capacity" || field === "position" ? Number(value) : value } as PlacementConfig : item)); }
+  function addShopSlot() { setDraft((current) => { const numbers = current.filter((item) => item.kind === "shop").map((item) => Number(item.key.replace(/^shop_/, ""))).filter(Number.isFinite); const next = numbers.length ? Math.max(...numbers) + 1 : 1; return [...current, { key: `shop_${next}`, kind: "shop", name: `店铺赞助位 ${next}`, description: "展示在全部店铺页面赞助区域", dailyPrice: 10, minDays: 1, maxDays: 30, capacity: 1, enabled: true, position: next - 1 }]; }); }
+  function save() { void act("placement-config", async () => { const next = await request<PlacementConfig[]>("/placements/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(draft) }); setDraft(next); }, "投放位置价格已保存"); }
+  async function orderAction(id: string, action: "approve" | "reject" | "refund") { const reason = action === "reject" ? window.prompt("请输入驳回原因") || "" : ""; if (action === "reject" && !reason) return; void act(`placement-${action}-${id}`, () => request(`/placements/orders/${id}/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action === "reject" ? { reason } : {}) }), action === "approve" ? "订单已通过审核并开始投放" : action === "reject" ? "订单已驳回，进入待退款" : "订单已标记退款"); }
+  return <div className="admin-module">
+    <PaymentProviderPanel config={paymentProviderConfig} busy={busy} request={request} act={act} />
+    <section className="admin-panel">
+      <div className="admin-section-head">
+        <div><span className="kicker">广告商品设置</span><h2>投放位置与价格规则</h2><p className="admin-muted">中转广告和店铺广告分组管理，位置可继续扩展。</p></div>
+        <div className="admin-header-actions"><button className="button ghost compact" type="button" onClick={addShopSlot} disabled={Boolean(busy)}><Plus />新增店铺广告位</button><button className="button dark compact" type="button" onClick={save} disabled={Boolean(busy)}><CheckCircle />保存广告商品配置</button></div>
+      </div>
+      <div className="placement-admin-config">{draft.map((item) => <div className={`placement-admin-row ${item.kind === "shop" ? "is-shop" : "is-gateway"}`} key={item.key}>
+        <div><strong>{item.kind === "shop" ? "店铺广告" : "中转广告"} · {item.key}</strong><label>位置名称<input value={item.name} onChange={(event) => update(item.key, "name", event.target.value)} /></label><label>位置说明<input value={item.description} onChange={(event) => update(item.key, "description", event.target.value)} /></label></div>
+        <label>每日价格<input type="number" min="0" step="0.01" value={item.dailyPrice} onChange={(event) => update(item.key, "dailyPrice", event.target.value)} /></label>
+        <label>最少天数<input type="number" min="1" value={item.minDays} onChange={(event) => update(item.key, "minDays", event.target.value)} /></label>
+        <label>最多天数<input type="number" min="1" value={item.maxDays} onChange={(event) => update(item.key, "maxDays", event.target.value)} /></label>
+        <label>容量<input type="number" min="1" value={item.capacity} onChange={(event) => update(item.key, "capacity", event.target.value)} /></label>
+        <label>排序<input type="number" min="0" value={item.position} onChange={(event) => update(item.key, "position", event.target.value)} /></label>
+        <label className="admin-toggle"><input type="checkbox" checked={item.enabled} onChange={(event) => update(item.key, "enabled", event.target.checked)} />启用</label>
+      </div>)}</div>
+    </section>
+    <section className="admin-panel">
+      <div className="admin-section-head">
+        <div><span className="kicker">审核队列</span><h2>赞助广告订单</h2></div>
+        <small className="admin-muted">支付成功并收到异步通知后才会开放审核</small>
+      </div>
+      {orders.length ? <div className="placement-admin-orders">{orders.map((order) => {
+        const normalizedStatus = order.status.toLowerCase();
+        return <article key={order.id}>
+          <div className="placement-admin-order-head"><div>
+            <span className={`placement-status ${normalizedStatus}`}>{placementOrderStatusLabel(order.status)}</span>
+             <strong>{order.sponsorAd.title} <span className="placement-order-kind">{order.sponsorAd.kind === "shop" ? "店铺广告" : "中转广告"}</span></strong>
+            <small>{order.user.email} · {order.orderNo} · {formatTime(order.createdAt)}</small>
+          </div><b>¥{Number(order.totalAmount).toFixed(2)}</b></div>
+           <p>{order.items.map((item) => `${item.name || item.slotKey} ${item.days}天 ¥${Number(item.subtotal).toFixed(2)}`).join(" · ")}</p>
+          <div className="placement-admin-preview">
+            <div className="placement-admin-image">{order.sponsorAd.imageUrl ? <img src={order.sponsorAd.imageUrl} alt="广告预览" /> : <ImageSquare />}</div>
+            <p>{order.sponsorAd.description}<br /><small>{order.sponsorAd.modelTags.join(" · ")} {order.sponsorAd.pricingClaims ? ` · ${order.sponsorAd.pricingClaims}` : ""}</small></p>
+          </div>
+          {normalizedStatus === "pending_payment" && <p className="placement-admin-order-hint"><Clock />等待用户完成支付。易支付异步通知验证成功后，订单会自动进入“待管理员审核”，届时显示通过和驳回按钮。</p>}
+          {normalizedStatus === "pending_payment" && paymentProviderConfig && !paymentProviderConfig.configured && <p className="placement-admin-order-hint is-warning"><WarningCircle />当前易支付未配置，订单会保持待付款。请先在上方保存 {paymentProviderConfig.missing.join("、")}。</p>}
+          {normalizedStatus === "paid_pending_review" && <div className="placement-admin-actions">
+            <button className="button dark compact" type="button" onClick={() => void orderAction(order.id, "approve")} disabled={Boolean(busy)}><CheckCircle />审核通过</button>
+            <button className="button ghost compact" type="button" onClick={() => void orderAction(order.id, "reject")} disabled={Boolean(busy)}><WarningCircle />驳回</button>
+          </div>}
+          {normalizedStatus === "refund_pending" && <button className="button ghost compact" type="button" onClick={() => void orderAction(order.id, "refund")} disabled={Boolean(busy)}>标记已退款</button>}
+        </article>;
+      })}</div> : <div className="admin-empty compact"><CreditCard /><strong>暂无付费广告订单</strong></div>}
+    </section>
+  </div>;
+}
+
+function placementOrderStatusLabel(status: string) {
+  return ({
+    pending_payment: "待付款",
+    payment_processing: "支付处理中",
+    paid_pending_review: "待管理员审核",
+    approved: "已通过",
+    refund_pending: "待退款",
+    refunded: "已退款",
+    cancelled: "已取消",
+  } as Record<string, string>)[status.toLowerCase()] || status;
+}
+
+function UserAdminPanel({ request }: { request: AdminRequest }) {
+  const [data, setData] = useState<AdminUserPage | null>(null);
+  const [query, setQuery] = useState("");
+  const [role, setRole] = useState("all");
+  const [status, setStatus] = useState("all");
+  const [page, setPage] = useState(1);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setError("");
+      const params = new URLSearchParams({ q: query, role, status, page: String(page), pageSize: "30" });
+      setData(await request<AdminUserPage>(`/users?${params.toString()}`));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "用户列表加载失败"); }
+  }, [page, query, request, role, status]);
+  useEffect(() => { void load(); }, [load]);
+
+  async function updateUser(id: string, action: "status" | "role", body: Record<string, unknown>, success: string) {
+    setBusy(`${action}-${id}`); setError(""); setMessage("");
+    try { await request(`/users/${id}/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); setMessage(success); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "用户更新失败"); }
+    finally { setBusy(null); }
+  }
+  function toggle(user: AdminUser) {
+    if (user.role === "admin") return;
+    const action = user.active ? "停用" : "恢复";
+    if (user.active && !window.confirm(`确定停用 ${user.email}？未付款订单会取消，已付款待审订单会转为待退款，正在投放的广告会立即停止。`)) return;
+    void updateUser(user.id, "status", { active: !user.active }, `用户已${action}`);
+  }
+  return <div className="admin-module"><section className="admin-panel"><div className="admin-section-head"><div><span className="kicker">SUPER ADMIN</span><h2>用户管理</h2></div><span className="result-summary">{data ? `${data.total} 个用户` : "加载中"}</span></div><div className="admin-user-toolbar"><label><span>搜索邮箱</span><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="输入邮箱" /></label><label><span>角色</span><select value={role} onChange={(event) => { setRole(event.target.value); setPage(1); }}><option value="all">全部角色</option><option value="buyer">普通用户</option><option value="merchant">商家</option><option value="moderator">运营人员</option><option value="admin">超级管理员</option></select></label><label><span>状态</span><select value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }}><option value="all">全部状态</option><option value="active">正常</option><option value="disabled">已停用</option></select></label><button className="button ghost compact" type="button" onClick={() => void load()} disabled={Boolean(busy)}><ArrowsClockwise />刷新</button></div>{error && <p className="admin-error"><WarningCircle />{error}</p>}{message && <p className="admin-success"><CheckCircle />{message}</p>}<div className="admin-user-list">{data?.items.map((user) => <article key={user.id} className={user.active ? "" : "is-disabled"}><div className="admin-user-main"><div className="admin-user-avatar"><UserCircle /></div><div><strong>{user.email}</strong><small>{user.verified ? "已验证" : "未验证"} · 注册于 {formatTime(user.createdAt)}</small><div className="admin-user-metrics"><span>广告 {user.ads}</span><span>订单 {user.orders}</span>{Object.entries(user.orderStatuses).map(([key, count]) => <span key={key}>{statusLabel(key)} {count}</span>)}</div></div></div><div className="admin-user-controls"><span className={user.active ? "source-state active" : "source-state manual"}>{user.active ? "正常" : "已停用"}</span>{user.role === "admin" ? <span className="source-state manual">超级管理员</span> : <select value={user.role} disabled={Boolean(busy)} aria-label={`调整 ${user.email} 的角色`} onChange={(event) => void updateUser(user.id, "role", { role: event.target.value }, "用户角色已更新")}><option value="buyer">普通用户</option><option value="merchant">商家</option><option value="moderator">运营人员</option></select>}<button className={user.active ? "icon-button danger" : "icon-button"} type="button" title={user.active ? "停用用户" : "恢复用户"} aria-label={`${user.active ? "停用" : "恢复"} ${user.email}`} disabled={user.role === "admin" || Boolean(busy)} onClick={() => toggle(user)}>{user.active ? <UserMinus /> : <UserPlus />}</button></div></article>)}{!data?.items.length && <div className="admin-empty compact"><UsersThree /><strong>没有匹配的用户</strong><span>调整搜索条件后重试。</span></div>}</div><div className="admin-pagination"><button className="button ghost compact" type="button" disabled={!data || page <= 1} onClick={() => setPage((current) => current - 1)}>上一页</button><span>{data ? `${page} / ${data.totalPages}` : "—"}</span><button className="button ghost compact" type="button" disabled={!data || page >= data.totalPages} onClick={() => setPage((current) => current + 1)}>下一页</button></div></section></div>;
+}
+
+function statusLabel(status: string) {
+  return ({ pending_payment: "待付款", payment_processing: "支付中", paid_pending_review: "待审核", approved: "已通过", refund_pending: "待退款", refunded: "已退款", cancelled: "已取消" } as Record<string, string>)[status] || status;
+}
+
 function ListingPanel({ type, title, items, busy, request, act }: { type: "gateway" | "project"; title: string; items: Listing[]; busy: string | null; request: AdminRequest; act: (key: string, action: () => Promise<unknown>, success: string) => Promise<void> }) {
   const isSponsor = type === "gateway";
-  const [draft, setDraft] = useState<ListingDraft>(emptyListingDraft);
+  const [draft, setDraft] = useState<ListingDraft>(() => createListingDraft(type));
   const [editingId, setEditingId] = useState<string | null>(null);
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [clearThumbnail, setClearThumbnail] = useState(false);
   const [imageError, setImageError] = useState("");
   const preview = useObjectPreview(thumbnail, clearThumbnail ? null : (draft.thumbnailUrl || items.find((item) => item.id === editingId)?.thumbnailUrl || null));
   const update = (field: keyof ListingDraft, value: string) => setDraft((current) => ({ ...current, [field]: value }));
-  const reset = () => { setDraft(emptyListingDraft); setEditingId(null); setThumbnail(null); setClearThumbnail(false); setImageError(""); };
-  const edit = (item: Listing) => { setEditingId(item.id); setDraft({ title: item.title, description: item.description, url: item.url, thumbnailUrl: item.thumbnailUrl?.startsWith("https://") ? item.thumbnailUrl : "", badge: item.badge || "", modelTags: item.modelTags.join(", "), pricingClaims: item.pricingClaims || "" }); };
+  const reset = () => { setDraft(createListingDraft(type)); setEditingId(null); setThumbnail(null); setClearThumbnail(false); setImageError(""); };
+  const edit = (item: Listing) => { setEditingId(item.id); setDraft({ title: item.title, description: item.description, url: item.url, thumbnailUrl: item.thumbnailUrl?.startsWith("https://") ? item.thumbnailUrl : "", badge: item.badge || "", modelTags: item.modelTags.join(", "), pricingClaims: item.pricingClaims || "", gatewayPlacement: item.gatewayPlacement, homeSideSlot: item.homeSideSlot || "", homeBottomPlacement: item.homeBottomPlacement }); };
   const submit = (event: FormEvent) => { event.preventDefault(); const form = new FormData(); Object.entries({ type, ...draft, clearThumbnail }).forEach(([key, value]) => form.append(key, String(value))); if (thumbnail) form.append("thumbnail", thumbnail); void act(`listing-${editingId || type}`, async () => { await request(editingId ? `/listings/${editingId}` : "/listings", { method: "POST", body: form }); reset(); }, editingId ? `${title}已更新` : `${title}已添加`); };
   return <div className="admin-module">
     <section className="admin-panel listing-editor">
@@ -858,13 +1021,14 @@ function ListingPanel({ type, title, items, busy, request, act }: { type: "gatew
           <div className="listing-image-upload full"><div className="listing-image-preview">{preview ? <img src={preview} alt="赞助横幅预览" /> : <ImageSquare aria-hidden="true" />}</div><div><strong>本地横幅图片（16:9）</strong><p>PNG、JPEG 或 WebP，最大 5 MB，前台将居中裁切。</p><label className="button ghost compact"><UploadSimple />选择本地图片<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0] || null; const valid = !file || (["image/png", "image/jpeg", "image/webp"].includes(file.type) && file.size <= 5 * 1024 * 1024); setImageError(!valid ? (file && file.size > 5 * 1024 * 1024 ? "图片不能超过 5 MB" : "仅支持 PNG、JPEG 或 WebP 图片") : ""); if (valid) { setThumbnail(file); setClearThumbnail(false); update("thumbnailUrl", ""); } }} /></label></div></div>
           <label><span>模型标签</span><input maxLength={500} value={draft.modelTags} onChange={(event) => update("modelTags", event.target.value)} placeholder="GPT, Claude, Gemini" /><small>多个标签使用逗号分隔，最多 20 个。</small></label>
           <label><span>价格标签</span><input maxLength={100} value={draft.pricingClaims} onChange={(event) => update("pricingClaims", event.target.value)} placeholder="例如：低至 0.5 折" /></label>
+          <div className="listing-placement-fields full"><span className="listing-placement-label">首页投放位置</span><div className="listing-placement-options"><label className="listing-placement-check"><input type="checkbox" checked={draft.gatewayPlacement} onChange={(event) => setDraft((current) => ({ ...current, gatewayPlacement: event.target.checked }))} /><span>中转站目录</span></label><label><span>首页侧边</span><select value={draft.homeSideSlot} onChange={(event) => setDraft((current) => ({ ...current, homeSideSlot: event.target.value as "" | SideAdSlot }))}><option value="">不投放</option><option value="left">左侧</option><option value="right">右侧</option></select></label><label className="listing-placement-check"><input type="checkbox" checked={draft.homeBottomPlacement} onChange={(event) => setDraft((current) => ({ ...current, homeBottomPlacement: event.target.checked }))} /><span>首页底部</span></label></div><small>同一赞助商可以同时投放到多个位置；首页左右侧各只有一个广告位。</small></div>
         </>}
         <label className="full"><span>{isSponsor ? "赞助简介" : "展示说明"}</span><textarea maxLength={4000} rows={5} value={draft.description} onChange={(event) => update("description", event.target.value)} /></label>
         <div className="listing-form-actions"><button className="button dark" type="submit" disabled={Boolean(busy) || Boolean(imageError)}>{editingId ? <CheckCircle /> : <Plus />}{editingId ? "保存修改" : isSponsor ? "添加赞助位" : "添加到展示"}</button>{editingId && <button className="button ghost" type="button" onClick={reset}><XCircle />取消编辑</button>}</div>
       </form>
     </section>
     <section className="admin-panel"><div className="admin-section-head"><div><span className="kicker">展示顺序</span><h2>已添加{title}</h2></div><span className="result-summary">{items.filter((item) => item.active).length} 个启用</span></div>
-      <div className="admin-listing-list">{items.map((item) => <article className="admin-listing-row" key={item.id}><MediaThumbnail value={item.thumbnailUrl} label={item.title} kind="listing" /><div><strong>{item.title}{item.badge && <span>{item.badge}</span>}</strong><small>{item.url}</small><p>{item.description || "暂无说明"}</p>{isSponsor && <div className="gateway-feature-tags">{item.modelTags.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}{item.pricingClaims && <b>{item.pricingClaims}</b>}</div>}</div><span className={item.active ? "source-state active" : "source-state manual"}>{item.active ? "展示中" : "已停用"}</span><div className="admin-listing-actions"><button className="icon-button" type="button" title="编辑" aria-label={`编辑 ${item.title}`} onClick={() => edit(item)}><Pencil /></button>{isSponsor && <GatewayProbeConfig managedListingId={item.id} managedListingName={item.title} request={request} />}<button className="icon-button danger" type="button" title={item.active ? "停用" : "启用"} onClick={() => void act(`listing-toggle-${item.id}`, () => request(`/listings/${item.id}/toggle`, { method: "POST" }), `${title}已${item.active ? "停用" : "启用"}`)}>{item.active ? <EyeSlash /> : <Eye />}</button></div></article>)}</div>
+      <div className="admin-listing-list">{items.map((item) => <article className="admin-listing-row" key={item.id}><MediaThumbnail value={item.thumbnailUrl} label={item.title} kind="listing" /><div><strong>{item.title}{item.badge && <span>{item.badge}</span>}</strong><small>{item.url}</small><p>{item.description || "暂无说明"}</p>{isSponsor && <div className="gateway-feature-tags">{item.modelTags.slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}{item.pricingClaims && <b>{item.pricingClaims}</b>}<div className="listing-placement-tags">{item.gatewayPlacement && <span>中转站目录</span>}{item.homeSideSlot && <span>首页{item.homeSideSlot === "left" ? "左侧" : "右侧"}</span>}{item.homeBottomPlacement && <span>首页底部</span>}</div></div>}</div><span className={item.active ? "source-state active" : "source-state manual"}>{item.active ? "展示中" : "已停用"}</span><div className="admin-listing-actions"><button className="icon-button" type="button" title="编辑" aria-label={`编辑 ${item.title}`} onClick={() => edit(item)}><Pencil /></button>{isSponsor && <GatewayProbeConfig managedListingId={item.id} managedListingName={item.title} request={request} />}<button className="icon-button danger" type="button" title={item.active ? "停用" : "启用"} onClick={() => void act(`listing-toggle-${item.id}`, () => request(`/listings/${item.id}/toggle`, { method: "POST" }), `${title}已${item.active ? "停用" : "启用"}`)}>{item.active ? <EyeSlash /> : <Eye />}</button></div></article>)}</div>
     </section>
   </div>;
 }

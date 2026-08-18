@@ -1,2 +1,5 @@
-import type { Metadata } from "next";import { Bell, ChartBar, ShieldCheck, Storefront } from "@phosphor-icons/react/dist/ssr";import { AccountForm } from "@/components/Forms";
-export const metadata:Metadata={title:"用户中心"};export default async function AccountPage({searchParams}:{searchParams:Promise<{mode?:string}>}){const {mode}=await searchParams;return <section className="account-page"><div className="shell account-layout"><aside className="account-aside"><span className="kicker light">PLATFORM ACCOUNT</span><h1>管理你的店铺与关注</h1><p>查看店铺动态、接收价格变化通知，并安全认领你的店铺。</p>{[[Bell,"站内与邮件通知"],[Storefront,"店铺认领与资料管理"],[ChartBar,"点击、曝光与同步数据"],[ShieldCheck,"可撤销安全会话"]].map(([Icon,text])=><div className="account-feature" key={String(text)}><Icon/><span>{String(text)}</span></div>)}</aside><AccountForm initialMode={mode==="register"?"register":"login"}/></div></section>}
+import type { Metadata } from "next";
+import { AccountEntry } from "@/components/AccountDashboard";
+
+export const metadata: Metadata = { title: "用户中心" };
+export default async function AccountPage({ searchParams }: { searchParams: Promise<{ mode?: string }> }) { const { mode } = await searchParams; return <AccountEntry initialMode={mode === "register" ? "register" : "login"} />; }

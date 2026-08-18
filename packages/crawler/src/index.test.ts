@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isBlockedAddress, normalizeTitle, parsePrice, parseTaokayouShopPage, productFingerprint } from "./index";
+import { isBlockedAddress, normalizeTitle, parseCardnavPayload, parsePrice, parseTaokayouShopPage, productFingerprint } from "./index";
 
 describe("product normalization", () => {
   it("normalizes full-width text and punctuation", () => expect(normalizeTitle("ＧＰＴ PLUS｜30天 - 直充")).toBe("gpt plus 30天 直充"));
@@ -41,4 +41,24 @@ describe("Taokayou public directory parser", () => {
       "<html><body>changed</body></html>",
     )).toThrow("missing a name");
   });
+});
+
+describe("public catalog parsers", () => {
+  it("joins Cardnav compressed products to their shop and category", () => {
+    const result = parseCardnavPayload({
+      c: ["ChatGPT"],
+      s: [["shop-hash", "测试店铺", "https://pay.ldxp.cn/shop/demo", 1_786_980_000_000, 88.5, 0]],
+      p: [[0, 0, "GPT Plus", 19.9, null, "https://pay.ldxp.cn/item/demo", 3, 1, 1_786_980_100_000, 99.1]],
+    });
+
+    expect(result).toMatchObject({ rejectedShops: 0, rejectedOffers: 0 });
+    expect(result.shops[0]).toMatchObject({ externalId: "shop-hash", name: "测试店铺", shopUrl: "https://pay.ldxp.cn/shop/demo" });
+    expect(result.offers[0]).toMatchObject({ shopExternalId: "shop-hash", category: "ChatGPT", productName: "GPT Plus", price: 19.9, stock: 3, stockStatus: "in_stock" });
+  });
+
+  it("rejects Cardnav rows that cannot be linked safely", () => {
+    const result = parseCardnavPayload({ c: [], s: [["bad", "Bad", "http://127.0.0.1"]], p: [[0, 0, "Bad", 1, null, "http://127.0.0.1/item", 1, 1]] });
+    expect(result).toMatchObject({ shops: [], offers: [], rejectedShops: 1, rejectedOffers: 1 });
+  });
+
 });

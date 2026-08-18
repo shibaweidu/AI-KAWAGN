@@ -1,0 +1,3 @@
+-- Historical paid-placement migration was applied to the database before this
+-- repository snapshot. The current application keeps its legacy tables for
+-- compatibility and uses the SponsorPlacement* tables for new user ads.
